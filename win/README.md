@@ -87,5 +87,5 @@ cargo tauri build --bundles nsis
 ## 已知限制 / 后续
 
 - 与 Mac 版一致：只读、无热重载、无滚动位置记忆。
-- 图标从 `../dzq050232.jpg`（中心裁剪到正方形）生成，两端共用。需要换图时改 `MDdzq/icon-source.png` 后重跑 icon 生成步骤。
+- 图标从 `../dzq050232.jpg`（中心裁剪到正方形）生成，两端共用。需要换图时改 `MDGEM/icon-source.png` 后重跑 icon 生成步骤。
 - 安装包约 8–12 MB（自带 WebView2 系统组件由 Win 10/11 提供）。
