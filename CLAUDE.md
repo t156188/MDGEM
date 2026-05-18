@@ -87,18 +87,24 @@ Two distinct triggers:
 
 Plain commit / push paths **do not** touch version numbers, tags, or GitHub Releases.
 
-**Full release flow**, with two confirmation gates:
+**Full release flow**, with two confirmation gates. Artifacts are built and published entirely on GitHub; nothing is downloaded locally during the release.
 
 1. Bump the patch version (1.0.0 → 1.0.1 → … → 1.0.11) across the five manifest files (see "Version numbers"). Run `cargo update -p mdreader --offline` to sync `Cargo.lock`. Only bump minor/major when explicitly asked. Exception: if the current version hasn't shipped (no GitHub Release for it), release as-is — don't bump.
 2. **🛑 GATE 1 — version confirmation.** Show the user the new version and wait for confirmation before any commit.
-3. On confirm: commit (`Release X.Y.Z: <subject>`) and `git push origin main`. CI auto-triggers from path filters.
-4. Watch the runs in the background (`gh run watch`). When all artifacts complete, `gh run download` them and flatten into `release/v<version>/` (e.g. `release/v1.0.0/MDGEM-arm64.dmg`). Commit + push as `Archive X.Y.Z release binaries`. Safe step — repo files only, nothing user-visible yet.
-5. Tell the user the three file paths + sizes and ask them to install/test.
+3. On confirm: commit (`Release X.Y.Z: <subject>`) and `git push origin main`. This also triggers the per-push smoke-test workflows (`macos-build.yml` / `windows-build.yml`), which are independent of the release.
+4. Create and push the tag: `git tag -a vX.Y.Z -m "MDGEM X.Y.Z"` + `git push origin vX.Y.Z`. The tag push triggers `.github/workflows/release.yml`, which builds mac arm64 + intel + win and creates a **draft** GitHub Release with the three artifacts attached.
+5. Watch with `gh run watch`. When the `release` job finishes, give the user the draft URL via `gh release view vX.Y.Z --web` (or just print the URL) and ask them to download from the Release page and install/test.
 6. **🛑 GATE 2 — publish confirmation.** Wait for explicit "OK / 可以发" before step 7. State-check questions like "是不是…?" are *not* approval.
-7. On confirm: `git tag -a v<version>` + `gh release create v<version> release/v<version>/* --title "MDGEM X.Y.Z" --notes "…"` + `git push origin v<version>`. Tag and Release are always created together — don't tag earlier (a rejected build would leave an orphan tag).
+7. On confirm: `gh release edit vX.Y.Z --draft=false` to flip the draft to a public Release. The tag already exists from step 4, so nothing else is needed.
 
-**If GATE 2 is rejected:** version stays bumped (don't roll back). Next release goes to the *next* patch (rejected 1.0.2 → next attempt is 1.0.3). Optionally `git rm -rf release/v<version>/ && git commit` to drop the unpublished binaries — ask the user first.
+**If GATE 2 is rejected:** version stays bumped (don't roll back). Choose one:
+- Leave the draft Release alone (it stays invisible to the public) and cut the next patch — rejected 1.0.2 → next attempt is 1.0.3.
+- Or fully clean up: `gh release delete vX.Y.Z --cleanup-tag` (removes the draft Release **and** deletes the tag locally + on origin), then next attempt re-uses the same patch number. Ask the user before deleting.
+
+**Signing:** the mac build currently uses ad-hoc signing (`CODE_SIGN_IDENTITY="-"`, `CODE_SIGNING_REQUIRED=NO`); the win build is fully unsigned. When the user is ready to add Developer ID signing + notarization, the change is contained to `release.yml` and a handful of GitHub Secrets — no flow changes above.
 
 ## CI
 
-`.github/workflows/macos-build.yml` (matrix: arm64 + intel → two DMGs) triggers on `mac/**` push. `windows-build.yml` (NSIS `.exe`) triggers on `win/**` or `mac/Resources/**` push, since the win shell consumes `mac/Resources/`. Artifacts are in the workflow run's Artifacts panel.
+`.github/workflows/macos-build.yml` (matrix: arm64 + intel → two DMGs) triggers on `mac/**` push. `windows-build.yml` (NSIS `.exe`) triggers on `win/**` or `mac/Resources/**` push, since the win shell consumes `mac/Resources/`. Both are **smoke tests on main pushes** — artifacts are in the workflow run's Artifacts panel and are not published anywhere.
+
+`.github/workflows/release.yml` is the **release** workflow: it triggers on tag push (`v*`) or `workflow_dispatch`, builds mac arm64 + intel + win in parallel, and creates a draft GitHub Release with the three artifacts. See "Release workflow" for the full flow.

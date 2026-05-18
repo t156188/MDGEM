@@ -1,0 +1,147 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to (re)release, e.g. v1.0.12'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-mac:
+    name: macOS ${{ matrix.arch }}
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            suffix: arm64
+          - arch: x86_64
+            suffix: intel
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Build front-end vendor bundle
+        working-directory: mac/build-web
+        run: |
+          npm install --no-fund --no-audit
+          npm run build
+
+      - name: Generate Xcode project
+        working-directory: mac
+        run: xcodegen generate
+
+      - name: Build .app (${{ matrix.arch }})
+        working-directory: mac
+        run: |
+          xcodebuild \
+            -project MDReader.xcodeproj \
+            -scheme MDReader \
+            -configuration Release \
+            -derivedDataPath build \
+            -arch ${{ matrix.arch }} \
+            ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package as DMG
+        working-directory: mac
+        run: |
+          APP="build/Build/Products/Release/MDGEM.app"
+          DMG="../MDGEM-${{ matrix.suffix }}.dmg"
+          STAGE="$(mktemp -d)/dmg"
+          mkdir -p "$STAGE"
+          cp -R "$APP" "$STAGE/"
+          ln -s /Applications "$STAGE/Applications"
+          hdiutil create -volname "MDGEM" -srcfolder "$STAGE" \
+            -ov -format UDZO "$DMG"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mac-${{ matrix.suffix }}
+          path: MDGEM-${{ matrix.suffix }}.dmg
+          if-no-files-found: error
+
+  build-win:
+    name: Windows x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            win/src-tauri/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('win/src-tauri/Cargo.lock') }}
+
+      - name: Build viewer vendor bundle
+        working-directory: mac/build-web
+        run: |
+          npm install
+          npm run build
+
+      - name: Install tauri CLI
+        run: cargo install tauri-cli --version "^2" --locked
+
+      - name: Build Windows installer
+        working-directory: win/src-tauri
+        run: cargo tauri build --bundles nsis
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win
+          path: win/src-tauri/target/release/bundle/nsis/*.exe
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    needs: [build-mac, build-win]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List artifacts
+        run: ls -lh dist/
+
+      - name: Resolve tag
+        id: tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "name=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          tag_name: ${{ steps.tag.outputs.name }}
+          name: MDGEM ${{ steps.tag.outputs.version }}
+          files: dist/*
+          fail_on_unmatched_files: true
+          generate_release_notes: true
