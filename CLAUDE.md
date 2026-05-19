@@ -96,6 +96,7 @@ Plain commit / push paths **do not** touch version numbers, tags, or GitHub Rele
 5. Watch with `gh run watch`. When the `release` job finishes, give the user the draft URL via `gh release view vX.Y.Z --web` (or just print the URL) and ask them to download from the Release page and install/test.
 6. **🛑 GATE 2 — publish confirmation.** Wait for explicit "OK / 可以发" before step 7. State-check questions like "是不是…?" are *not* approval.
 7. On confirm: `gh release edit vX.Y.Z --draft=false` to flip the draft to a public Release. The tag already exists from step 4, so nothing else is needed.
+8. **Archive binaries.** `mkdir -p release/vX.Y.Z/`, then `gh release download vX.Y.Z -D release/vX.Y.Z/` to pull the three published artifacts into the repo (`MDGEM-arm64.dmg`, `MDGEM-intel.dmg`, `MDGEM_X.Y.Z_x64-setup.exe` — keep CI filenames as-is). Commit as a **separate** follow-up: `Archive X.Y.Z release binaries`. The `release/` directory is intentionally **not** gitignored — it's the in-repo binary archive so anyone can grab a known-good build without re-running CI.
 
 **If GATE 2 is rejected:** version stays bumped (don't roll back). Choose one:
 - Leave the draft Release alone (it stays invisible to the public) and cut the next patch — rejected 1.0.2 → next attempt is 1.0.3.
