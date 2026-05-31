@@ -44,6 +44,43 @@ await build({
   legalComments: 'none',
 });
 
+// Terminal (xterm.js + fit addon), loaded on demand when the terminal panel
+// first opens. Exposes window.MDTerm = { Terminal, FitAddon }.
+await build({
+  entryPoints: [resolve(__dirname, 'entries/terminal.entry.js')],
+  bundle: true,
+  minify: true,
+  format: 'iife',
+  globalName: 'MDTerm',
+  outfile: resolve(outDir, 'terminal.bundle.js'),
+  target: ['safari16'],
+  legalComments: 'none',
+});
+
+// Code editor (CodeMirror 6), loaded on demand the first time an editable
+// file is opened in edit mode. Exposes window.MDEditor = { createEditor, … }.
+await build({
+  entryPoints: [resolve(__dirname, 'entries/editor.entry.js')],
+  bundle: true,
+  minify: true,
+  format: 'iife',
+  globalName: 'MDEditor',
+  outfile: resolve(outDir, 'editor.bundle.js'),
+  target: ['safari16'],
+  legalComments: 'none',
+});
+
+// Standalone settings page, loaded in its own window on each platform.
+await build({
+  entryPoints: [resolve(__dirname, 'entries/settings.entry.js')],
+  bundle: true,
+  minify: true,
+  format: 'iife',
+  outfile: resolve(outDir, 'settings.bundle.js'),
+  target: ['safari16'],
+  legalComments: 'none',
+});
+
 // Copy the highlight.js + KaTeX CSS so we can ship them as static stylesheets.
 const hlCssSrc = resolve(__dirname, 'node_modules/highlight.js/styles/github.css');
 const hlCssDarkSrc = resolve(__dirname, 'node_modules/highlight.js/styles/github-dark.css');
@@ -54,5 +91,8 @@ await cp(hlCssSrc, resolve(outDir, 'hljs-light.css'));
 await cp(hlCssDarkSrc, resolve(outDir, 'hljs-dark.css'));
 await cp(katexCssSrc, resolve(outDir, 'katex.min.css'));
 await cp(katexFontsSrc, resolve(outDir, 'fonts'), { recursive: true });
+
+const xtermCssSrc = resolve(__dirname, 'node_modules/@xterm/xterm/css/xterm.css');
+await cp(xtermCssSrc, resolve(outDir, 'xterm.css'));
 
 console.log('✅ Front-end assets built to', outDir);

@@ -1,18 +1,19 @@
 import Foundation
 
 extension Notification.Name {
-    static let mdreaderRecentsChanged = Notification.Name("mdreader.recentsChanged")
+    static let mdgemRecentsChanged = Notification.Name("mdgem.recentsChanged")
 }
 
 /// Application-wide list of recently opened markdown files. Stored in
 /// UserDefaults so every DocumentGroup window sees the same list. Order is
 /// newest-first, capped at `maxCount`.
 enum RecentFiles {
-    static let defaultsKey = "mdreader.recentFiles"
+    static let defaultsKey = "mdgem.recentFiles"
     static let maxCount = 12
 
     static func read() -> [String] {
-        UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
+        migrateLegacyIfNeeded()
+        return UserDefaults.standard.stringArray(forKey: defaultsKey) ?? []
     }
 
     static func add(_ path: String) {
@@ -23,7 +24,7 @@ enum RecentFiles {
         list.insert(trimmed, at: 0)
         if list.count > maxCount { list = Array(list.prefix(maxCount)) }
         UserDefaults.standard.set(list, forKey: defaultsKey)
-        NotificationCenter.default.post(name: .mdreaderRecentsChanged, object: nil)
+        NotificationCenter.default.post(name: .mdgemRecentsChanged, object: nil)
     }
 
     /// Drop entries whose target no longer exists. Cheap to do — we only ever
@@ -33,7 +34,7 @@ enum RecentFiles {
         let alive = list.filter { FileManager.default.fileExists(atPath: $0) }
         if alive.count != list.count {
             UserDefaults.standard.set(alive, forKey: defaultsKey)
-            NotificationCenter.default.post(name: .mdreaderRecentsChanged, object: nil)
+            NotificationCenter.default.post(name: .mdgemRecentsChanged, object: nil)
         }
     }
 
@@ -42,5 +43,23 @@ enum RecentFiles {
         guard let data = try? JSONSerialization.data(withJSONObject: list, options: []),
               let json = String(data: data, encoding: .utf8) else { return "[]" }
         return json
+    }
+
+    // One-shot lift from the pre-rename plist (bundle id com.lv.mdreader, key
+    // mdreader.recentFiles). Reads via CFPreferences because UserDefaults.standard
+    // only sees the current bundle's plist after the id change.
+    private static let migrationFlagKey = "mdgem.didMigrateFromMDReader"
+    private static func migrateLegacyIfNeeded() {
+        let std = UserDefaults.standard
+        if std.bool(forKey: migrationFlagKey) { return }
+        defer { std.set(true, forKey: migrationFlagKey) }
+        guard std.stringArray(forKey: defaultsKey) == nil else { return }
+        let raw = CFPreferencesCopyAppValue(
+            "mdreader.recentFiles" as CFString,
+            "com.lv.mdreader" as CFString
+        )
+        if let arr = raw as? [String], !arr.isEmpty {
+            std.set(arr, forKey: defaultsKey)
+        }
     }
 }

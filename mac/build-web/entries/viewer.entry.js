@@ -4,6 +4,7 @@ import deflist from 'markdown-it-deflist';
 import hljs from 'highlight.js';
 import katex from 'katex';
 import renderMathInElement from 'katex/contrib/auto-render';
+import { iconForFile, iconForFolder } from '../entries/file-icons.js';
 
 const md = new MarkdownIt({
   html: false,
@@ -53,7 +54,7 @@ async function ensureMermaid() {
   window.MDMermaid.default.initialize({
     startOnLoad: false,
     securityLevel: 'strict',
-    theme: document.documentElement.dataset.theme === 'dark' ? 'dark' : 'default',
+    theme: document.documentElement.dataset.base === 'dark' ? 'dark' : 'default',
   });
   mermaidLoaded = true;
 }
@@ -204,7 +205,14 @@ function setLoading(visible) {
   }
 }
 
+// The most recently rendered markdown source + its base dir — handed to the AI
+// panel as the "current file" context and used to re-render after an edit.
+let lastRenderedText = '';
+let lastBaseDir = '';
+
 async function render(text, baseDir) {
+  lastRenderedText = text || '';
+  if (baseDir) lastBaseDir = baseDir;
   const root = document.getElementById('root');
   // Rewrite relative image paths to file:// URLs so WKWebView's
   // file-URL access whitelist (granted in Swift) can fetch them.
@@ -221,6 +229,7 @@ async function render(text, baseDir) {
     };
     md.validateLink = () => true;
   }
+  try { FindBar.close(); } catch {}
   const html = md.render(text || '');
   root.innerHTML = html;
   const outline = assignHeadingIds(root);
@@ -233,6 +242,7 @@ async function render(text, baseDir) {
   Sidebar.setOutline(outline);
   setLoading(false);
   updateEmptyState();
+  try { DocView.onMarkdownRendered(); } catch {}
   try {
     window.webkit?.messageHandlers?.didRender?.postMessage({ length: text.length });
   } catch {}
@@ -245,31 +255,446 @@ function scrollToAnchor(id) {
   return true;
 }
 
-function setTheme(arg) {
-  // Accept either a string ('light'/'dark') or {name, pref}. The pref is the
-  // user's choice (system/light/dark) — name is the resolved effective theme.
-  let name, pref;
-  if (typeof arg === 'string') {
-    name = arg;
-  } else if (arg && typeof arg === 'object') {
-    name = arg.name;
-    pref = arg.pref;
+// ===================================================================
+// Theme + global UI settings. Themes are named (8+); each has a light/dark
+// `base` that drives the highlight.js stylesheet, mermaid, terminal and editor
+// palettes. The native shell still resolves the OS appearance for the
+// `system` choice and pushes it via setTheme({name, pref}); a named theme is
+// applied entirely in the front-end (it carries its own base), so it ignores
+// that push. Font sizes are CSS custom properties on :root so every surface
+// scales from one place. The settings blob persists natively (uiSettings).
+// ===================================================================
+
+// `sw` = [background, accent, foreground] preview swatch colors (must mirror
+// the [data-theme='id'] CSS var sets in viewer.css).
+const THEMES = [
+  { id: 'light',          label: 'Light',           base: 'light', sw: ['#ffffff', '#0969da', '#1f2328'] },
+  { id: 'dark',           label: 'Dark',            base: 'dark',  sw: ['#0d1117', '#4493f8', '#e6edf3'] },
+  { id: 'github-dimmed',  label: 'GitHub Dimmed',   base: 'dark',  sw: ['#22272e', '#539bf5', '#adbac7'] },
+  { id: 'one-dark',       label: 'One Dark',        base: 'dark',  sw: ['#282c34', '#61afef', '#abb2bf'] },
+  { id: 'nord',           label: 'Nord',            base: 'dark',  sw: ['#2e3440', '#88c0d0', '#d8dee9'] },
+  { id: 'dracula',        label: 'Dracula',         base: 'dark',  sw: ['#282a36', '#bd93f9', '#f8f8f2'] },
+  { id: 'tokyo-night',    label: 'Tokyo Night',     base: 'dark',  sw: ['#1a1b26', '#7aa2f7', '#a9b1d6'] },
+  { id: 'monokai',        label: 'Monokai',         base: 'dark',  sw: ['#272822', '#a6e22e', '#f8f8f2'] },
+  { id: 'gruvbox-dark',   label: 'Gruvbox Dark',    base: 'dark',  sw: ['#282828', '#fabd2f', '#ebdbb2'] },
+  { id: 'solarized-dark', label: 'Solarized Dark',  base: 'dark',  sw: ['#002b36', '#268bd2', '#93a1a1'] },
+  { id: 'solarized-light',label: 'Solarized Light', base: 'light', sw: ['#fdf6e3', '#268bd2', '#586e75'] },
+  { id: 'rose-pine-dawn', label: 'Rosé Pine Dawn',  base: 'light', sw: ['#faf4ed', '#d7827e', '#575279'] },
+];
+const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
+
+const SETTINGS_DEFAULTS = {
+  theme: 'system',     // 'system' | 'light' | 'dark' | <named theme id>
+  fontUI: 13,          // sidebar / tree / outline (px)
+  fontEditor: 13,      // CodeMirror + code preview (px)
+  fontTerminal: 13,    // xterm (px)
+  fontAI: 13,          // AI panel (px)
+  autoSave: 'off',     // 'off' | 'afterEdit' | 'onBlur' | 'onLeave'
+};
+const FONT_MIN = 10;
+const FONT_MAX = 28;
+const AUTOSAVE_MODES = ['off', 'afterEdit', 'onBlur', 'onLeave'];
+const SETTINGS_LS_KEY = 'mdgem.ui.settings';
+let uiSettings = { ...SETTINGS_DEFAULTS };
+// OS-resolved base ('light'|'dark') pushed by native — used only when the
+// chosen theme is 'system'.
+let nativeBase = 'dark';
+
+function clampFont(v, def) {
+  const n = Math.round(Number(v));   // integer sizes only (no .5)
+  if (!Number.isFinite(n)) return def;
+  return Math.max(FONT_MIN, Math.min(FONT_MAX, n));
+}
+
+function normalizeSettings(s) {
+  const out = { ...SETTINGS_DEFAULTS };
+  if (s && typeof s === 'object') {
+    if (typeof s.theme === 'string') out.theme = s.theme;
+    out.fontUI = clampFont(s.fontUI, SETTINGS_DEFAULTS.fontUI);
+    out.fontEditor = clampFont(s.fontEditor, SETTINGS_DEFAULTS.fontEditor);
+    out.fontTerminal = clampFont(s.fontTerminal, SETTINGS_DEFAULTS.fontTerminal);
+    out.fontAI = clampFont(s.fontAI, SETTINGS_DEFAULTS.fontAI);
+    if (AUTOSAVE_MODES.includes(s.autoSave)) out.autoSave = s.autoSave;
   }
-  if (name) {
-    document.documentElement.dataset.theme = name === 'dark' ? 'dark' : 'light';
-    if (mermaidLoaded && window.MDMermaid) {
-      // Re-init mermaid with new theme; existing diagrams stay until next render.
-      window.MDMermaid.default.initialize({
-        startOnLoad: false,
-        securityLevel: 'strict',
-        theme: name === 'dark' ? 'dark' : 'default',
+  return out;
+}
+
+// The theme id + base actually applied right now, resolving 'system' against
+// the OS appearance the native shell reported.
+function resolvedTheme() {
+  const pick = uiSettings.theme;
+  if (pick === 'system') {
+    const base = nativeBase === 'dark' ? 'dark' : 'light';
+    return { id: base, base };
+  }
+  const t = THEME_BY_ID[pick];
+  if (t) return { id: t.id, base: t.base };
+  // Unknown id — fall back to system.
+  const base = nativeBase === 'dark' ? 'dark' : 'light';
+  return { id: base, base };
+}
+
+function applyTheme() {
+  const { id, base } = resolvedTheme();
+  const docEl = document.documentElement;
+  docEl.dataset.theme = id;
+  docEl.dataset.base = base;
+  if (mermaidLoaded && window.MDMermaid) {
+    window.MDMermaid.default.initialize({
+      startOnLoad: false,
+      securityLevel: 'strict',
+      theme: base === 'dark' ? 'dark' : 'default',
+    });
+  }
+  try { TerminalPanel.applyTheme(); } catch {}
+  try { DocView.applyTheme(); } catch {}
+}
+
+function applyFontSizes() {
+  const s = document.documentElement.style;
+  s.setProperty('--ui-font-size', `${uiSettings.fontUI}px`);
+  s.setProperty('--editor-font-size', `${uiSettings.fontEditor}px`);
+  s.setProperty('--ai-font-size', `${uiSettings.fontAI}px`);
+  try { TerminalPanel.applyFontSize(uiSettings.fontTerminal); } catch {}
+}
+
+function applyAllSettings() {
+  applyFontSizes();
+  applyTheme();
+}
+
+// Native theme push: tracks the OS-resolved base for the 'system' choice and
+// reapplies if (and only if) the user is on 'system'. A named theme ignores it.
+function setTheme(arg) {
+  let name;
+  if (typeof arg === 'string') name = arg;
+  else if (arg && typeof arg === 'object') name = arg.name;
+  if (name === 'dark' || name === 'light') nativeBase = name;
+  applyTheme();
+}
+
+// reqId → resolver, for native settings round-trips (shares the AI pending map).
+function requestSettingsGet() {
+  return new Promise((resolve) => {
+    const reqId = `set-get-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.settingsGet) {
+        window.webkit.messageHandlers.settingsGet.postMessage({ reqId });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:settings-get', { reqId }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve(null);
+  });
+}
+
+function requestSettingsSet(settings) {
+  try {
+    if (window.webkit?.messageHandlers?.settingsSet) {
+      window.webkit.messageHandlers.settingsSet.postMessage({ settings });
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:settings-set', { settings });
+  } catch {}
+}
+
+// Ask the host to open the standalone settings window, optionally jumping to a
+// section ('appearance' | 'editor' | 'shortcuts' | 'ai').
+function requestOpenSettings(section) {
+  const payload = section ? { section } : {};
+  try {
+    if (window.webkit?.messageHandlers?.openSettings) {
+      window.webkit.messageHandlers.openSettings.postMessage(payload);
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:open-settings', payload);
+  } catch {}
+}
+
+// Live-apply a settings blob pushed from the settings window (broadcast by the
+// host after a change), so every open project window updates immediately.
+function applySettingsBlob(blob) {
+  uiSettings = normalizeSettings(blob);
+  try { localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(uiSettings)); } catch {}
+  applyAllSettings();
+}
+
+// Persist the current settings blob (native + a localStorage cache so the next
+// cold boot can paint the right theme/fonts before settingsGet resolves).
+function persistSettings() {
+  try { localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(uiSettings)); } catch {}
+  requestSettingsSet(uiSettings);
+}
+
+// Per-workspace memory IPC (keyed by workspace root path). Shares the AI
+// pending map for the get round-trip.
+function requestMemoryGet(key) {
+  return new Promise((resolve) => {
+    const reqId = `mem-get-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.memoryGet) {
+        window.webkit.messageHandlers.memoryGet.postMessage({ reqId, key });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:memory-get', { reqId, key }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve(null);
+  });
+}
+
+function requestMemorySet(key, memory) {
+  try {
+    if (window.webkit?.messageHandlers?.memorySet) {
+      window.webkit.messageHandlers.memorySet.postMessage({ key, memory });
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:memory-set', { key, memory });
+  } catch {}
+}
+
+// History IPC. `scope` is 'chat' or 'term'. Each conversation / terminal
+// session is one native JSON file under MDGEM/<scope>/<id>.json, with an
+// index.json listing record metadata. Four verbs — list/read/write/delete —
+// all round-trip through the AI pending map and resolve on onHistoryLoaded.
+// The record's `workspace` field scopes it; the front-end filters by workspace.
+function requestHistory(verb, payload) {
+  const handler = `history${verb[0].toUpperCase()}${verb.slice(1)}`; // historyList, …
+  return new Promise((resolve) => {
+    const reqId = `hist-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    const msg = { reqId, ...payload };
+    try {
+      if (window.webkit?.messageHandlers?.[handler]) {
+        window.webkit.messageHandlers[handler].postMessage(msg);
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit(`mdreader:history-${verb}`, msg); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve(null);
+  });
+}
+
+const requestHistoryList = (scope) => requestHistory('list', { scope });
+const requestHistoryRead = (scope, id) => requestHistory('read', { scope, id });
+const requestHistoryWrite = (scope, id, record) => requestHistory('write', { scope, id, record });
+const requestHistoryDelete = (scope, id) => requestHistory('delete', { scope, id });
+
+// Record id / filename: YYYY_MMDD_HHMM_xx (xx = 2 random base36 chars), e.g.
+// 2026_0530_1406_rz. Native sanitizes to [A-Za-z0-9_], so keep it ASCII-safe.
+function fmtId() {
+  const d = new Date();
+  const p = (n, w = 2) => String(n).padStart(w, '0');
+  const rand = Math.random().toString(36).slice(2, 4).padEnd(2, '0');
+  return `${d.getFullYear()}_${p(d.getMonth() + 1)}${p(d.getDate())}`
+    + `_${p(d.getHours())}${p(d.getMinutes())}_${rand}`;
+}
+
+// Settings modal — gear button in the sidebar footer opens it. Theme picker +
+// per-surface font sizes. Changes apply live; the blob persists globally.
+const Settings = (() => {
+  let built = false;
+
+  // Cold boot: paint from the localStorage cache instantly, then reconcile
+  // with the native store (source of truth) once it answers.
+  function init() {
+    let cached = null;
+    try { cached = JSON.parse(localStorage.getItem(SETTINGS_LS_KEY) || 'null'); } catch {}
+    if (cached) uiSettings = normalizeSettings(cached);
+    applyAllSettings();
+    requestSettingsGet().then((s) => {
+      if (s && typeof s === 'object') {
+        uiSettings = normalizeSettings(s);
+        try { localStorage.setItem(SETTINGS_LS_KEY, JSON.stringify(uiSettings)); } catch {}
+        applyAllSettings();
+        if (built) syncControls();
+      }
+    });
+  }
+
+  function build() {
+    const host = document.getElementById('settings-modal');
+    if (!host) return;
+    const themeCards = THEMES.map((t) => `
+      <button class="set-theme-card" data-theme-id="${t.id}" type="button" title="${escapeHtml(t.label)}">
+        <span class="set-theme-sw" style="background:${t.sw[0]}">
+          <span class="set-theme-dot" style="background:${t.sw[1]}"></span>
+          <span class="set-theme-bar" style="background:${t.sw[2]}"></span>
+        </span>
+        <span class="set-theme-name">${escapeHtml(t.label)}</span>
+      </button>`).join('');
+    const fontRow = (key, label) => `
+      <div class="set-font-row" data-font="${key}">
+        <span class="set-font-label">${escapeHtml(label)}</span>
+        <button class="set-step" data-step="-1" type="button" aria-label="减小">−</button>
+        <input class="set-range" type="range" min="${FONT_MIN}" max="${FONT_MAX}" step="1">
+        <button class="set-step" data-step="1" type="button" aria-label="增大">+</button>
+        <span class="set-font-val"></span>
+      </div>`;
+    host.innerHTML = `
+      <div class="set-backdrop"></div>
+      <div class="set-box" role="dialog" aria-label="设置">
+        <header class="set-head">
+          <span class="set-title">设置</span>
+          <button class="set-close" type="button" aria-label="关闭">×</button>
+        </header>
+        <div class="set-body">
+          <section class="set-section">
+            <h3 class="set-h">主题</h3>
+            <button class="set-theme-card set-theme-system" data-theme-id="system" type="button">
+              <span class="set-theme-sw set-theme-sw-auto"><span class="set-theme-dot"></span></span>
+              <span class="set-theme-name">跟随系统</span>
+            </button>
+            <div class="set-theme-grid">${themeCards}</div>
+          </section>
+          <section class="set-section">
+            <h3 class="set-h">字号</h3>
+            ${fontRow('fontUI', '界面 / 文件树')}
+            ${fontRow('fontEditor', '编辑器')}
+            ${fontRow('fontTerminal', '终端')}
+            ${fontRow('fontAI', 'AI 面板')}
+          </section>
+        </div>
+      </div>`;
+
+    host.querySelector('.set-backdrop').addEventListener('click', close);
+    host.querySelector('.set-close').addEventListener('click', close);
+    host.querySelectorAll('.set-theme-card').forEach((card) => {
+      card.addEventListener('click', () => pickTheme(card.dataset.themeId));
+    });
+    host.querySelectorAll('.set-font-row').forEach((row) => {
+      const key = row.dataset.font;
+      const range = row.querySelector('.set-range');
+      range.addEventListener('input', () => setFont(key, parseFloat(range.value)));
+      row.querySelectorAll('.set-step').forEach((b) => {
+        b.addEventListener('click', () => setFont(key, uiSettings[key] + Number(b.dataset.step)));
       });
+    });
+    built = true;
+  }
+
+  function pickTheme(id) {
+    uiSettings.theme = id;
+    applyTheme();
+    persistSettings();
+    syncControls();
+  }
+
+  function setFont(key, value) {
+    uiSettings[key] = clampFont(value, SETTINGS_DEFAULTS[key]);
+    applyFontSizes();
+    persistSettings();
+    syncControls();
+  }
+
+  // Reflect uiSettings into the controls (selected theme card + slider values).
+  function syncControls() {
+    const host = document.getElementById('settings-modal');
+    if (!host || !built) return;
+    host.querySelectorAll('.set-theme-card').forEach((c) => {
+      c.classList.toggle('is-active', c.dataset.themeId === uiSettings.theme);
+    });
+    host.querySelectorAll('.set-font-row').forEach((row) => {
+      const key = row.dataset.font;
+      const v = uiSettings[key];
+      row.querySelector('.set-range').value = String(v);
+      row.querySelector('.set-font-val').textContent = `${v}px`;
+    });
+  }
+
+  function open() {
+    if (!built) build();
+    syncControls();
+    const host = document.getElementById('settings-modal');
+    if (host) host.hidden = false;
+    document.addEventListener('keydown', onKey);
+  }
+
+  function close() {
+    const host = document.getElementById('settings-modal');
+    if (host) host.hidden = true;
+    document.removeEventListener('keydown', onKey);
+  }
+
+  function onKey(e) {
+    if (e.key === 'Escape') { e.preventDefault(); close(); }
+  }
+
+  return { init, open, close };
+})();
+
+// Home page — the empty-state turned into a welcome screen (shown whenever no
+// document is on screen). Open-file / open-folder buttons ask the host for its
+// native dialog; the recents list reopens past workspaces. On Windows this is
+// the launch screen; on macOS the launch screen is a native welcome window and
+// this also covers empty document windows (e.g. a folder with no markdown).
+const Home = (() => {
+  let recents = [];
+
+  function init() {
+    const ver = document.getElementById('home-version');
+    if (ver) {
+      const v = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
+      ver.textContent = v ? `v${v}` : '';
+    }
+    document.getElementById('home-open-folder')?.addEventListener('click', () => requestOpenFolderDialog());
+    document.getElementById('home-open-file')?.addEventListener('click', () => requestOpenFileDialog());
+    renderRecents();
+  }
+
+  function setRecents(list) {
+    recents = Array.isArray(list) ? list.filter((s) => typeof s === 'string') : [];
+    renderRecents();
+  }
+
+  function renderRecents() {
+    const wrap = document.getElementById('home-recents');
+    const title = document.getElementById('home-recents-title');
+    if (!wrap) return;
+    const items = recents.slice(0, 8);
+    if (title) title.hidden = items.length === 0;
+    wrap.innerHTML = '';
+    for (const p of items) {
+      const row = document.createElement('div');
+      row.className = 'home-recent';
+      row.title = p;
+      const name = document.createElement('span');
+      name.className = 'home-recent-name';
+      name.textContent = p.split(/[\\/]/).pop() || p;
+      const dir = document.createElement('span');
+      dir.className = 'home-recent-dir';
+      dir.textContent = p;
+      row.appendChild(name);
+      row.appendChild(dir);
+      row.addEventListener('click', () => requestOpenRecent(p));
+      wrap.appendChild(row);
     }
   }
-  if (pref) {
-    Sidebar.setThemePref(pref);
-  }
-}
+
+  return { init, setRecents };
+})();
 
 // ===================================================================
 // Sidebar (Files + Outline) — lives entirely in the front-end so both
@@ -293,6 +718,248 @@ function requestOpenFile(path) {
     }
   } catch {}
 }
+
+// ===================================================================
+// File preview — the sidebar lists every file (not just markdown). Clicking
+// a non-md file previews it in #root: images/video/html point straight at the
+// file URL; text/code are fetched through the host (readFileText IPC); markdown
+// goes through the normal host open path. Anything else shows a placeholder.
+// ===================================================================
+
+const PREVIEW_EXT = {
+  image: ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif'],
+  video: ['mp4', 'webm', 'mov', 'm4v', 'ogv', 'ogg'],
+  html: ['html', 'htm'],
+};
+const MD_EXT = ['md', 'markdown', 'mdown', 'mkd', 'mkdn'];
+// Generous text/code allowlist. Anything not listed here (and not a known
+// binary media type above) falls back to "preview not supported".
+const TEXT_EXT = [
+  'txt', 'text', 'log', 'json', 'jsonc', 'yaml', 'yml', 'toml', 'ini', 'cfg', 'conf',
+  'csv', 'tsv', 'xml', 'env', 'properties', 'gitignore', 'editorconfig',
+  'js', 'mjs', 'cjs', 'jsx', 'ts', 'tsx', 'css', 'scss', 'sass', 'less',
+  'rs', 'swift', 'py', 'rb', 'go', 'java', 'kt', 'kts', 'c', 'h', 'cc', 'cpp', 'hpp',
+  'cxx', 'm', 'mm', 'cs', 'php', 'pl', 'lua', 'sh', 'bash', 'zsh', 'fish', 'ps1',
+  'sql', 'r', 'dart', 'scala', 'clj', 'ex', 'exs', 'erl', 'hs', 'vue', 'svelte',
+  'gradle', 'dockerfile', 'makefile', 'cmake', 'gemfile', 'rakefile', 'tex', 'bib',
+];
+
+function fileExt(path) {
+  const base = (path || '').split(/[\\/]/).pop() || '';
+  const dot = base.lastIndexOf('.');
+  if (dot <= 0) {
+    // Dotless names like Makefile / Dockerfile are still text.
+    return base.toLowerCase();
+  }
+  return base.slice(dot + 1).toLowerCase();
+}
+
+function previewKind(path) {
+  const ext = fileExt(path);
+  if (MD_EXT.includes(ext)) return 'md';
+  if (PREVIEW_EXT.image.includes(ext)) return 'image';
+  if (PREVIEW_EXT.video.includes(ext)) return 'video';
+  if (PREVIEW_EXT.html.includes(ext)) return 'html';
+  if (TEXT_EXT.includes(ext)) return 'text';
+  return 'unsupported';
+}
+
+// Turn an OS path into a URL the webview can load. Windows (Tauri) needs the
+// asset:// conversion exposed by bridge.js; macOS (WKWebView) uses file:// under
+// the read-access grant.
+function fileURLFor(path) {
+  const conv = window.__mdr && window.__mdr.convertFileSrc;
+  if (typeof conv === 'function') {
+    try { return conv(path); } catch {}
+  }
+  const enc = String(path).split(/[\\/]/).map(encodeURIComponent).join('/');
+  return 'file://' + (enc.startsWith('/') ? enc : '/' + enc);
+}
+
+// Pending text reads — reqId → {resolve, reject}.
+const pendingReads = new Map();
+let readSeq = 0;
+function requestReadFile(path) {
+  return new Promise((resolve) => {
+    const reqId = `rf-${Date.now().toString(36)}-${(++readSeq).toString(36)}`;
+    pendingReads.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.readFileText) {
+        window.webkit.messageHandlers.readFileText.postMessage({ path, reqId });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:read-file-text', { path, reqId }); return; }
+    } catch {}
+    pendingReads.delete(reqId);
+    resolve({ path, ok: false, error: 'No host bridge available' });
+  });
+}
+
+function onReadFileResult(reqId, payload) {
+  const resolve = pendingReads.get(reqId);
+  if (!resolve) return;
+  pendingReads.delete(reqId);
+  resolve(payload || { ok: false, error: 'Empty result' });
+}
+
+function requestOpenExternal(path) {
+  try {
+    if (window.webkit?.messageHandlers?.openExternal) {
+      window.webkit.messageHandlers.openExternal.postMessage({ path });
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:open-external', fileURLFor(path));
+  } catch {}
+}
+
+// Home-page actions — ask the host to present its native open dialog (a
+// directory is a valid target), or re-open a recent. Fire-and-forget; the
+// host opens the chosen target as a new workspace.
+function requestOpenFileDialog() {
+  try {
+    if (window.webkit?.messageHandlers?.openFileDialog) {
+      window.webkit.messageHandlers.openFileDialog.postMessage({});
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:open-file-dialog', {});
+  } catch {}
+}
+
+function requestOpenFolderDialog() {
+  try {
+    if (window.webkit?.messageHandlers?.openFolderDialog) {
+      window.webkit.messageHandlers.openFolderDialog.postMessage({});
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:open-folder-dialog', {});
+  } catch {}
+}
+
+function requestOpenRecent(path) {
+  try {
+    if (window.webkit?.messageHandlers?.openRecent) {
+      window.webkit.messageHandlers.openRecent.postMessage({ path });
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit('mdreader:open-recent', path);
+  } catch {}
+}
+
+// Finalize a non-md preview: drop loader, clear the outline, mark the row, and
+// scroll the pane to the top. `inner` is the HTML to place in #root.
+function showPreview(node, inner) {
+  const root = document.getElementById('root');
+  if (!root) return;
+  try { FindBar.close(); } catch {}
+  root.innerHTML = inner;
+  Sidebar.setOutline([]);
+  Sidebar.setActivePreview(node.path);
+  const main = document.getElementById('main');
+  if (main) main.scrollTop = 0;
+  setLoading(false);
+  updateEmptyState();
+  try { Tabs.note(node.path, previewKind(node.path)); } catch {}
+}
+
+// The sandboxed iframe markup used to render an .html file's live preview.
+function htmlFrameHTML(path) {
+  return `<iframe class="preview-frame" sandbox="allow-same-origin" src="${escapeHtml(fileURLFor(path))}"></iframe>`;
+}
+
+function escapeHtml(s) {
+  return md.utils.escapeHtml(String(s == null ? '' : s));
+}
+
+async function previewFile(node) {
+  const kind = previewKind(node.path);
+  try { Tabs.captureScroll(); } catch {}
+  // Switching away from a dirty editor: auto-save (or confirm discard) first.
+  if (DocView.isDirty() && DocView.path() !== node.path) {
+    const ok = await DocView.prepareLeave();
+    if (!ok) return;
+  }
+  if (kind === 'md') {
+    requestOpenFile(node.path);
+    return;
+  }
+  // Re-clicking the file already on screen is a no-op.
+  if (Sidebar.activePreview() === node.path) return;
+
+  const name = node.name || node.path;
+  if (kind === 'image') {
+    DocView.toReadonly();
+    showPreview(node, `<div class="preview-host"><img class="preview-media" alt="${escapeHtml(name)}" src="${escapeHtml(fileURLFor(node.path))}"></div>`);
+    return;
+  }
+  if (kind === 'video') {
+    DocView.toReadonly();
+    showPreview(node, `<div class="preview-host"><video class="preview-media" controls src="${escapeHtml(fileURLFor(node.path))}"></video></div>`);
+    return;
+  }
+  if (kind === 'html') {
+    // HTML opens as a live preview but is editable (toggle to edit the source).
+    DocView.openHtml(node);
+    return;
+  }
+  if (kind === 'text') {
+    // Code / text files open in the editor by default (toggle to preview).
+    await DocView.openText(node);
+    return;
+  }
+  DocView.toReadonly();
+  showPreview(node, previewUnsupportedHTML(node));
+}
+
+// Render a text/code file into #root with highlight.js (by extension).
+function renderTextPreview(node, text) {
+  const ext = fileExt(node.path);
+  let body;
+  try {
+    if (ext && hljs.getLanguage(ext)) {
+      body = hljs.highlight(text, { language: ext, ignoreIllegals: true }).value;
+    } else {
+      body = escapeHtml(text);
+    }
+  } catch {
+    body = escapeHtml(text);
+  }
+  showPreview(node, `<pre class="preview-code"><code class="hljs">${body}</code></pre>`);
+}
+
+function previewUnsupportedHTML(node, reason) {
+  const ext = fileExt(node.path);
+  const label = ext ? `.${escapeHtml(ext)}` : escapeHtml(node.name || 'this file');
+  const why = reason ? `<div class="preview-unsupported-why">${escapeHtml(reason)}</div>` : '';
+  return `<div class="preview-unsupported">
+    <div class="preview-unsupported-glyph">⊘</div>
+    <div class="preview-unsupported-title">Can't preview ${label}</div>
+    ${why}
+    <button class="preview-open-ext" type="button">Open in default app</button>
+  </div>`;
+}
+
+// Delegate the "Open in default app" button (re-created on each preview).
+document.addEventListener('click', (e) => {
+  const btn = e.target && e.target.closest && e.target.closest('.preview-open-ext');
+  if (!btn) return;
+  const p = Sidebar.activePreview();
+  if (p) requestOpenExternal(p);
+});
 
 // Pending lazy-folder scans — reqId → path, plus the set of folder paths
 // currently waiting on a host response (drives the inline spinner).
@@ -333,10 +1000,13 @@ const Sidebar = (() => {
   // stub — otherwise opening an md inside such a folder would collapse it.
   const scannedDirs = new Map();
   let currentRootPath = '';
-  let currentThemePref = 'system';
   // Native hosts still push recents via MDViewerAPI.setRecents — held here in
   // case a UI is reintroduced; nothing renders them today.
   let currentRecents = [];
+  // Path of a non-markdown file currently shown in the preview pane. Markdown
+  // opens go through the host (which sets currentTree.current); non-md previews
+  // are JS-only, so we track the highlighted row here.
+  let previewPath = null;
 
   function el(id) { return document.getElementById(id); }
 
@@ -344,34 +1014,24 @@ const Sidebar = (() => {
     const sb = el('sidebar');
     if (!sb) return;
 
-    const w = parseInt(localStorage.getItem('mdreader.sb.width') || '260', 10);
+    const w = parseInt(localStorage.getItem('mdgem.sb.width') || '260', 10);
     if (Number.isFinite(w) && w >= 160 && w <= 480) sb.style.width = `${w}px`;
 
-    setCollapsed(localStorage.getItem('mdreader.sb.collapsed') === '1');
-    setTab(localStorage.getItem('mdreader.sb.tab') || 'files');
+    setCollapsed(localStorage.getItem('mdgem.sb.collapsed') === '1');
+    setTab(localStorage.getItem('mdgem.sb.tab') || 'files');
 
     document.querySelectorAll('.sb-tab').forEach((btn) => {
       btn.addEventListener('click', () => setTab(btn.dataset.tab));
     });
     el('sb-collapse')?.addEventListener('click', () => setCollapsed(true));
     el('sb-expand')?.addEventListener('click', () => setCollapsed(false));
-    document.querySelectorAll('.sb-theme-item').forEach((it) => {
-      it.addEventListener('click', () => {
-        const pref = it.dataset.pref;
-        setThemePref(pref);
-        requestSetThemePref(pref);
-      });
-    });
+    el('sb-settings-btn')?.addEventListener('click', () => requestOpenSettings());
     document.querySelectorAll('.sb-fortune-item').forEach((it) => {
       it.addEventListener('click', () => {
         const kind = it.dataset.kind;
         showFortune(kind || 'coin');
       });
     });
-
-    // Initial render — pref is overridden once the host pushes its real value.
-    // Fresh users (no localStorage entry) fall back to dark.
-    setThemePref(localStorage.getItem('mdreader.theme.pref') || 'dark');
 
     // Stamp the bundle's package version into the sidebar footer. The literal
     // is injected by esbuild's `define` (see build.mjs); falls back gracefully
@@ -386,36 +1046,6 @@ const Sidebar = (() => {
     updateEmptyState();
   }
 
-  function setThemePref(pref) {
-    if (pref !== 'system' && pref !== 'light' && pref !== 'dark') pref = 'system';
-    currentThemePref = pref;
-    localStorage.setItem('mdreader.theme.pref', pref);
-    renderThemeButton();
-  }
-
-  function renderThemeButton() {
-    const btn = el('sb-theme-btn');
-    if (!btn) return;
-    const icon = btn.querySelector('.sb-theme-icon');
-    const label = btn.querySelector('.sb-theme-label');
-    const map = {
-      system: { icon: '◐', label: 'Auto' },
-      light:  { icon: '☼', label: 'Light' },
-      dark:   { icon: '☾', label: 'Dark' },
-    };
-    const m = map[currentThemePref] || map.system;
-    if (icon) icon.textContent = m.icon;
-    if (label) label.textContent = m.label;
-    btn.title = `Theme: ${m.label}. Click to cycle.`;
-  }
-
-  function cycleThemePref() {
-    const order = ['system', 'light', 'dark'];
-    const next = order[(order.indexOf(currentThemePref) + 1) % order.length];
-    setThemePref(next);            // optimistic local update
-    requestSetThemePref(next);     // tell native to persist + re-resolve
-  }
-
   function setTab(name) {
     if (name !== 'files' && name !== 'outline') name = 'files';
     document.querySelectorAll('.sb-tab').forEach((btn) => {
@@ -427,7 +1057,8 @@ const Sidebar = (() => {
     if (outlinePane) outlinePane.hidden = name !== 'outline';
     const sb = el('sidebar');
     if (sb) sb.dataset.tab = name;
-    localStorage.setItem('mdreader.sb.tab', name);
+    localStorage.setItem('mdgem.sb.tab', name);
+    try { Memory.scheduleSave(); } catch {}
   }
 
   function setCollapsed(collapsed) {
@@ -435,7 +1066,8 @@ const Sidebar = (() => {
     const exp = el('sb-expand');
     if (sb) sb.hidden = !!collapsed;
     if (exp) exp.hidden = !collapsed;
-    localStorage.setItem('mdreader.sb.collapsed', collapsed ? '1' : '0');
+    localStorage.setItem('mdgem.sb.collapsed', collapsed ? '1' : '0');
+    try { Memory.scheduleSave(); } catch {}
   }
 
   function toggleCollapsed() {
@@ -464,18 +1096,42 @@ const Sidebar = (() => {
       dragging = false;
       document.body.style.userSelect = '';
       document.body.style.cursor = '';
-      localStorage.setItem('mdreader.sb.width', String(sb.offsetWidth));
+      localStorage.setItem('mdgem.sb.width', String(sb.offsetWidth));
+      try { Memory.scheduleSave(); } catch {}
     });
+  }
+
+  function setActivePreview(path) {
+    previewPath = path || null;
+    renderFiles();
+  }
+
+  function activePreview() {
+    return previewPath;
+  }
+
+  function currentFilePath() {
+    return (currentTree && currentTree.current) || null;
+  }
+
+  function workspaceRoot() {
+    return (currentTree && currentTree.root && currentTree.root.path) || null;
   }
 
   function setFileTree(payload) {
     currentTree = payload && payload.root ? payload : null;
+    // A real markdown open (host sets `current`) supersedes any non-md preview.
+    if (currentTree && currentTree.current) previewPath = null;
     if (currentTree?.root) {
       // If the workspace root changed, the cached lazy-dir contents from the
       // previous workspace are stale.
       if (currentTree.root.path !== currentRootPath) {
         scannedDirs.clear();
         currentRootPath = currentTree.root.path;
+        // New workspace entry — load & restore its remembered UI state.
+        try { Memory.onWorkspace(currentRootPath); } catch {}
+        // Drop tabs that belonged to the previous workspace.
+        try { Tabs.pruneToRoot(currentRootPath); } catch {}
       }
       // Re-hydrate any lazy nodes whose children we previously scanned, so
       // the host's "lazy stub" doesn't collapse a folder the user expanded.
@@ -488,6 +1144,12 @@ const Sidebar = (() => {
     }
     autoExpand();
     renderFiles();
+    // The host pushes the tree right *after* rendering a markdown doc (render
+    // runs before setFileTree), so `current` only becomes authoritative here.
+    // Re-sync the doc/tab state now that we know the real path.
+    if (currentTree && currentTree.current) {
+      try { DocView.onMarkdownRendered(); } catch {}
+    }
   }
 
   function onScanDirResult(reqId, payload) {
@@ -568,7 +1230,7 @@ const Sidebar = (() => {
       return;
     }
     pane.innerHTML = '';
-    pane.appendChild(buildNode(currentTree.root, currentTree.current));
+    pane.appendChild(buildNode(currentTree.root, previewPath || currentTree.current));
   }
 
   function buildNode(node, current) {
@@ -596,7 +1258,11 @@ const Sidebar = (() => {
       } else {
         toggle.textContent = open ? '▾' : '▸';
       }
+      const icon = document.createElement('span');
+      icon.className = 'tree-icon';
+      icon.innerHTML = iconForFolder(open && !isLazy);
       row.appendChild(toggle);
+      row.appendChild(icon);
       row.appendChild(label);
       if (isLazy && !isLoading) {
         const hint = document.createElement('span');
@@ -613,11 +1279,13 @@ const Sidebar = (() => {
           expanded.add(node.path);
           requestScanDir(node.path);
           renderFiles();
+          try { Memory.scheduleSave(); } catch {}
           return;
         }
         if (expanded.has(node.path)) expanded.delete(node.path);
         else expanded.add(node.path);
         renderFiles();
+        try { Memory.scheduleSave(); } catch {}
       });
       wrap.appendChild(row);
       if (open && !isLazy && node.children?.length) {
@@ -628,7 +1296,11 @@ const Sidebar = (() => {
       }
     } else {
       toggle.textContent = '';
+      const icon = document.createElement('span');
+      icon.className = 'tree-icon';
+      icon.innerHTML = iconForFile(fileExt(node.path));
       row.appendChild(toggle);
+      row.appendChild(icon);
       row.appendChild(label);
       row.addEventListener('click', () => {
         // Re-clicking the active file: native shells de-dupe the load (no
@@ -639,7 +1311,7 @@ const Sidebar = (() => {
           if (main) main.scrollTo({ top: 0, behavior: 'smooth' });
           return;
         }
-        requestOpenFile(node.path);
+        previewFile(node);
       });
       wrap.appendChild(row);
     }
@@ -654,19 +1326,23 @@ const Sidebar = (() => {
   function openContextMenu(x, y, node) {
     if (node.type === 'dir') {
       showContextMenu(x, y, [
-        { label: 'New File…',   action: () => promptCreate(node, 'file') },
-        { label: 'New Folder…', action: () => promptCreate(node, 'folder') },
+        { label: '添加到 AI', action: () => AIPanel.attachFile(node.path, true) },
+        'separator',
+        { label: '新建文件…',   action: () => promptCreate(node, 'file') },
+        { label: '新建文件夹…', action: () => promptCreate(node, 'folder') },
         'separator',
         { label: revealLabel(), action: () => fsOp({ op: 'reveal', path: node.path }) },
-        { label: 'Copy Path', action: () => copyPath(node.path) },
+        { label: '复制路径', action: () => copyPath(node.path) },
       ]);
     } else {
       showContextMenu(x, y, [
-        { label: 'Open', action: () => requestOpenFile(node.path) },
-        { label: revealLabel(), action: () => fsOp({ op: 'reveal', path: node.path }) },
-        { label: 'Copy Path', action: () => copyPath(node.path) },
+        { label: '添加到 AI', action: () => AIPanel.attachFile(node.path, false) },
         'separator',
-        { label: 'Rename…', action: () => promptRename(node) },
+        { label: '打开', action: () => previewFile(node) },
+        { label: revealLabel(), action: () => fsOp({ op: 'reveal', path: node.path }) },
+        { label: '复制路径', action: () => copyPath(node.path) },
+        'separator',
+        { label: '重命名…', action: () => promptRename(node) },
         { label: trashLabel(), danger: true, action: () => confirmDelete(node) },
       ]);
     }
@@ -696,34 +1372,2675 @@ const Sidebar = (() => {
     }
   }
 
+  // ── Per-workspace memory: capture / restore sidebar layout + expansions. ──
+  function collectLayout() {
+    const sb = el('sidebar');
+    const dirs = [];
+    if (currentTree?.root) {
+      walk(currentTree.root, (node) => {
+        if (node.type === 'dir' && expanded.has(node.path)
+            && node.path !== currentTree.root.path) {
+          dirs.push(node.path);
+        }
+      });
+    }
+    // Sidebar width is global (localStorage), not per-workspace — only the
+    // collapsed/tab state and expansions are remembered per project.
+    return {
+      sb: {
+        collapsed: !!(sb && sb.hidden),
+        tab: (sb && sb.dataset.tab) || 'files',
+      },
+      expandedFolders: dirs,
+    };
+  }
+
+  function restoreLayout(blob) {
+    if (!blob) return;
+    const s = blob.sb || {};
+    if (typeof s.collapsed === 'boolean') setCollapsed(s.collapsed);
+    if (s.tab) setTab(s.tab);
+    if (Array.isArray(blob.expandedFolders) && currentTree?.root) {
+      for (const p of blob.expandedFolders) expanded.add(p);
+      renderFiles();
+    }
+  }
+
+  function fileExists(path) {
+    if (!currentTree?.root || !path) return false;
+    let found = false;
+    walk(currentTree.root, (node) => { if (node.path === path) found = true; });
+    return found;
+  }
+
   return {
     init,
     setFileTree,
     setOutline,
-    setThemePref,
     toggleCollapsed,
     onScanDirResult,
     setRecents,
+    setActivePreview,
+    activePreview,
+    currentFilePath,
+    workspaceRoot,
+    collectLayout,
+    restoreLayout,
+    fileExists,
   };
 })();
 
-function requestSetThemePref(value) {
+// ===================================================================
+// Panels — right-side AI panel + bottom terminal panel. The scaffolding
+// (toggle buttons, show/hide, drag-to-resize) lives here; the panels' own
+// contents are wired up by their modules via PanelHooks.
+// ===================================================================
+
+// Lazily populated by the AI / terminal modules so this controller doesn't
+// hard-depend on them (keeps each build self-contained).
+const PanelHooks = {
+  ai: null,            // called once when the AI panel first opens
+  terminal: null,      // called once when the terminal panel first opens
+  terminalResized: null, // called after the terminal panel is resized/shown
+};
+
+const Panels = (() => {
+  function el(id) { return document.getElementById(id); }
+
+  function init() {
+    el('sb-ai-btn')?.addEventListener('click', () => toggleAi());
+    el('sb-term-btn')?.addEventListener('click', () => toggleTerminal());
+
+    const aiW = parseInt(localStorage.getItem('mdgem.ai.width') || '360', 10);
+    if (Number.isFinite(aiW)) {
+      const p = el('ai-panel');
+      if (p) p.style.width = `${Math.max(240, Math.min(720, aiW))}px`;
+    }
+    const termH = parseInt(localStorage.getItem('mdgem.term.height') || '260', 10);
+    if (Number.isFinite(termH)) {
+      const p = el('terminal-panel');
+      if (p) p.style.height = `${Math.max(120, Math.min(600, termH))}px`;
+    }
+
+    initAiResize();
+    initTermResize();
+  }
+
+  function aiOpen() { return !!(el('ai-panel') && !el('ai-panel').hidden); }
+  function terminalOpen() { return !!(el('terminal-panel') && !el('terminal-panel').hidden); }
+
+  function setAi(open) {
+    const panel = el('ai-panel');
+    const handle = el('ai-resize');
+    const btn = el('sb-ai-btn');
+    if (!panel) return;
+    panel.hidden = !open;
+    if (handle) handle.hidden = !open;
+    if (btn) btn.classList.toggle('is-active', open);
+    if (open && PanelHooks.ai) PanelHooks.ai();
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  function setTerminal(open) {
+    const panel = el('terminal-panel');
+    const handle = el('term-resize');
+    const btn = el('sb-term-btn');
+    if (!panel) return;
+    panel.hidden = !open;
+    if (handle) handle.hidden = !open;
+    if (btn) btn.classList.toggle('is-active', open);
+    if (open) {
+      if (PanelHooks.terminal) PanelHooks.terminal();
+      if (PanelHooks.terminalResized) PanelHooks.terminalResized();
+    }
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  function toggleAi() { setAi(!aiOpen()); }
+  function toggleTerminal() { setTerminal(!terminalOpen()); }
+
+  function initAiResize() {
+    const handle = el('ai-resize');
+    const row = el('content-row');
+    const panel = el('ai-panel');
+    if (!handle || !row || !panel) return;
+    let dragging = false;
+    handle.addEventListener('mousedown', (e) => {
+      dragging = true;
+      e.preventDefault();
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ew-resize';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const rect = row.getBoundingClientRect();
+      const w = Math.max(240, Math.min(720, rect.right - e.clientX));
+      panel.style.width = `${w}px`;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('mdgem.ai.width', String(panel.offsetWidth));
+      try { Memory.scheduleSave(); } catch {}
+    });
+  }
+
+  function initTermResize() {
+    const handle = el('term-resize');
+    const ws = el('workspace');
+    const panel = el('terminal-panel');
+    if (!handle || !ws || !panel) return;
+    let dragging = false;
+    handle.addEventListener('mousedown', (e) => {
+      dragging = true;
+      e.preventDefault();
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ns-resize';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const rect = ws.getBoundingClientRect();
+      const h = Math.max(120, Math.min(600, rect.bottom - e.clientY));
+      panel.style.height = `${h}px`;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('mdgem.term.height', String(panel.offsetHeight));
+      if (PanelHooks.terminalResized) PanelHooks.terminalResized();
+      try { Memory.scheduleSave(); } catch {}
+    });
+  }
+
+  // ── Per-workspace memory: capture / restore panel open-state only. Panel
+  // sizes (AI width / terminal height) are global via localStorage, so they
+  // are deliberately not stored per workspace. ──
+  function collectLayout() {
+    return {
+      ai: { open: aiOpen() },
+      term: { open: terminalOpen() },
+    };
+  }
+
+  function restoreLayout(blob) {
+    const p = blob && blob.panels;
+    if (!p) return;
+    if (p.ai && p.ai.open) setAi(true);
+    if (p.term && p.term.open) setTerminal(true);
+  }
+
+  return { init, toggleAi, toggleTerminal, aiOpen, terminalOpen, collectLayout, restoreLayout };
+})();
+
+// ===================================================================
+// AI assistant — config form + chat, with "apply edit" to the current file.
+// HTTP runs natively (see AIService.swift / lib.rs ai_chat_blocking); the panel
+// only builds messages and renders responses. Edits the model proposes inside a
+// ```md:apply fenced block become an "Apply" button gated by a confirm dialog.
+// ===================================================================
+
+const AI_PRESETS = {
+  qwen:     { label: '通义千问 (DashScope)', baseURL: 'https://dashscope.aliyuncs.com/compatible-mode/v1', model: 'qwen3-coder-plus' },
+  zhipu:    { label: '智谱 GLM',             baseURL: 'https://open.bigmodel.cn/api/coding/paas/v4',       model: 'glm-5.1' },
+  deepseek: { label: 'DeepSeek',             baseURL: 'https://api.deepseek.com/v1',                       model: 'deepseek-v4-pro' },
+  custom:   { label: '自定义 (OpenAI 兼容)',  baseURL: '',                                                  model: '' },
+};
+
+const AI_SYSTEM_PROMPT =
+  "You are MDGEM's built-in agent — one assistant for both office/writing work (Markdown, " +
+  'notes, docs) and coding. You operate inside the user\'s current workspace and have tools to ' +
+  'read, search, edit and create files, so you can actually finish a task instead of only ' +
+  'describing it.\n\n' +
+  'How to work:\n' +
+  '- Prefer acting over asking. Gather context yourself with read_file / list_dir / search.\n' +
+  '- For small, localized changes use edit_file (exact old→new). For new files or full rewrites ' +
+  'use write_file. Always send the file\'s real content, never a placeholder.\n' +
+  '- Match the existing language, tone and formatting of whatever you edit.\n' +
+  '- Keep going across as many tool calls as needed until the task is genuinely done, then end ' +
+  'with a short summary of what you did.\n' +
+  '- Use absolute paths. The workspace root and the currently open file are given below.\n' +
+  '- Reply in the user\'s language. Be concise; no filler.';
+
+// OpenAI function-tool schemas. File tools always available; command + web are
+// gated behind AI_CAPS and only advertised when their native backends exist.
+const AI_CAPS = { command: true, web: true };
+
+const FILE_TOOL_SPECS = [
+  { type: 'function', function: {
+    name: 'read_file',
+    description: 'Read a UTF-8 text file and return its full contents. Use an absolute path.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'Absolute file path' },
+    }, required: ['path'] },
+  } },
+  { type: 'function', function: {
+    name: 'list_dir',
+    description: 'List the files and folders directly inside a directory (one level). Absolute path.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string', description: 'Absolute directory path' },
+    }, required: ['path'] },
+  } },
+  { type: 'function', function: {
+    name: 'search',
+    description: 'Case-insensitive substring search across text files in the workspace. ' +
+      'Returns "relative/path:line: text" matches.',
+    parameters: { type: 'object', properties: {
+      query: { type: 'string', description: 'Text to find' },
+      path: { type: 'string', description: 'Directory to search; defaults to the workspace root' },
+    }, required: ['query'] },
+  } },
+  { type: 'function', function: {
+    name: 'edit_file',
+    description: 'Replace occurrences of `old` with `new` in a text file. `old` should be unique; ' +
+      'copy it from the file (whitespace differences are tolerated, but include enough context to ' +
+      'be unambiguous). By default replaces one occurrence and errors if `old` is not unique — set ' +
+      'replace_all to change every occurrence. Prefer this over write_file for small edits.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string' },
+      old: { type: 'string', description: 'Text to find (unique unless replace_all)' },
+      new: { type: 'string', description: 'Replacement text' },
+      replace_all: { type: 'boolean', description: 'Replace every occurrence (default false)' },
+    }, required: ['path', 'old', 'new'] },
+  } },
+  { type: 'function', function: {
+    name: 'write_file',
+    description: 'Create a file or overwrite it entirely with `content`. Use for new files or ' +
+      'full rewrites. Always include the complete intended content.',
+    parameters: { type: 'object', properties: {
+      path: { type: 'string' },
+      content: { type: 'string' },
+    }, required: ['path', 'content'] },
+  } },
+];
+
+const CMD_TOOL_SPEC = { type: 'function', function: {
+  name: 'run_command',
+  description: 'Run a non-interactive shell command in the workspace and return its stdout/stderr. ' +
+    'The user must approve each command. Use for build/test/git/grep and similar one-shot tasks. ' +
+    'Do not start long-running servers or interactive programs.',
+  parameters: { type: 'object', properties: {
+    command: { type: 'string', description: 'The full command line to run' },
+    cwd: { type: 'string', description: 'Working directory; defaults to the workspace root' },
+  }, required: ['command'] },
+} };
+
+const WEB_TOOL_SPEC = { type: 'function', function: {
+  name: 'web_search',
+  description: 'Search the public web and return a list of result titles, URLs and snippets. ' +
+    'Use to look up facts, docs or current information you do not already know.',
+  parameters: { type: 'object', properties: {
+    query: { type: 'string', description: 'Search query' },
+  }, required: ['query'] },
+} };
+
+function aiToolSpecs() {
+  const specs = FILE_TOOL_SPECS.slice();
+  if (AI_CAPS.command) specs.push(CMD_TOOL_SPEC);
+  if (AI_CAPS.web) specs.push(WEB_TOOL_SPEC);
+  return specs;
+}
+
+// reqId → resolver, for native chat round-trips.
+const pendingAi = new Map();
+// reqId → onDelta(text), for live streaming of a chat turn.
+const aiDeltaHandlers = new Map();
+let aiSeq = 0;
+
+function requestAiGetConfig() {
+  return new Promise((resolve) => {
+    const reqId = `ai-cfg-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.aiGetConfig) {
+        window.webkit.messageHandlers.aiGetConfig.postMessage({ reqId });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:ai-get-config', { reqId }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve(null);
+  });
+}
+
+function requestAiSetConfig(config) {
   try {
-    if (window.webkit?.messageHandlers?.setThemePref) {
-      window.webkit.messageHandlers.setThemePref.postMessage(value);
+    if (window.webkit?.messageHandlers?.aiSetConfig) {
+      window.webkit.messageHandlers.aiSetConfig.postMessage({ config });
       return;
     }
   } catch {}
   try {
     const ev = window.__TAURI__?.event;
-    if (ev?.emit) ev.emit('mdreader:set-theme-pref', value);
+    if (ev?.emit) ev.emit('mdreader:ai-set-config', { config });
   } catch {}
 }
 
+// ── AI config model ──
+// {
+//   providers: [{ id, name, baseURL, apiKey, models: string[] }],
+//   defaultModel: { providerId, model } | null,   // resolves the "Auto" entry
+//   prefs: { approvalPolicy, temperatureEnabled, temperature, systemPrompt, maxSteps }
+// }
+// approvalPolicy: 'ask' (confirm every write/command) | 'allowEdits' (auto-apply
+// file edits/writes, still confirm run_command) | 'allowAll' (no confirms).
+const AI_PREFS_DEFAULTS = {
+  approvalPolicy: 'ask',
+  temperatureEnabled: false,
+  temperature: 0.7,
+  systemPrompt: '',
+  maxSteps: 24,
+};
+
+function aiGenId() {
+  return `p-${(Date.now() % 1e7).toString(36)}-${Math.floor(performance.now()).toString(36)}-${(++aiSeq).toString(36)}`;
+}
+
+function normalizeAiConfig(c) {
+  const out = { providers: [], defaultModel: null, prefs: { ...AI_PREFS_DEFAULTS } };
+  if (!c || typeof c !== 'object') return out;
+  if (Array.isArray(c.providers)) {
+    out.providers = c.providers
+      .filter((p) => p && typeof p === 'object')
+      .map((p) => ({
+        id: typeof p.id === 'string' && p.id ? p.id : aiGenId(),
+        name: String(p.name || '').trim() || '未命名',
+        baseURL: String(p.baseURL || '').trim(),
+        apiKey: String(p.apiKey || '').trim(),
+        models: Array.isArray(p.models)
+          ? [...new Set(p.models.map((m) => String(m || '').trim()).filter(Boolean))]
+          : [],
+      }));
+  } else if (c.apiKey || c.baseURL || c.model) {
+    // Migrate the old single-provider config.
+    out.providers = [{
+      id: aiGenId(),
+      name: String(c.provider || '默认'),
+      baseURL: String(c.baseURL || '').trim(),
+      apiKey: String(c.apiKey || '').trim(),
+      models: c.model ? [String(c.model).trim()] : [],
+    }];
+  }
+  if (c.prefs && typeof c.prefs === 'object') {
+    const p = c.prefs;
+    out.prefs.approvalPolicy = ['ask', 'allowEdits', 'allowAll'].includes(p.approvalPolicy)
+      ? p.approvalPolicy
+      : (p.autoApprove ? 'allowAll' : 'ask');   // migrate the old boolean
+    out.prefs.temperatureEnabled = !!p.temperatureEnabled;
+    const t = Number(p.temperature);
+    out.prefs.temperature = Number.isFinite(t) ? Math.max(0, Math.min(2, t)) : 0.7;
+    out.prefs.systemPrompt = typeof p.systemPrompt === 'string' ? p.systemPrompt : '';
+    const ms = parseInt(p.maxSteps, 10);
+    out.prefs.maxSteps = Number.isFinite(ms) ? Math.max(1, Math.min(100, ms)) : 24;
+  }
+  // Validate defaultModel against available models; else fall back to the first.
+  const all = aiAllModels(out);
+  if (c.defaultModel && all.some((x) => x.providerId === c.defaultModel.providerId && x.model === c.defaultModel.model)) {
+    out.defaultModel = { providerId: c.defaultModel.providerId, model: c.defaultModel.model };
+  } else if (all.length) {
+    out.defaultModel = { providerId: all[0].providerId, model: all[0].model };
+  }
+  return out;
+}
+
+// Flatten every (provider, model) pair available for the chat dropdown.
+function aiAllModels(cfg) {
+  if (!cfg || !Array.isArray(cfg.providers)) return [];
+  const out = [];
+  for (const p of cfg.providers) {
+    for (const m of (p.models || [])) out.push({ providerId: p.id, provider: p.name, model: m });
+  }
+  return out;
+}
+
+// Resolve a dropdown selection to the credentials a chat request needs.
+//   sel: { providerId, model } | { auto: true } | null
+function aiResolveCreds(cfg, sel) {
+  const all = aiAllModels(cfg);
+  if (!all.length) return null;
+  let pick;
+  if (!sel || sel.auto) {
+    pick = (cfg.defaultModel && all.find((x) => x.providerId === cfg.defaultModel.providerId && x.model === cfg.defaultModel.model)) || all[0];
+  } else {
+    pick = all.find((x) => x.providerId === sel.providerId && x.model === sel.model) || all[0];
+  }
+  const provider = cfg.providers.find((p) => p.id === pick.providerId);
+  if (!provider || !provider.baseURL || !provider.apiKey) return null;
+  const creds = { baseURL: provider.baseURL, apiKey: provider.apiKey, model: pick.model };
+  const prefs = cfg.prefs || {};
+  if (prefs.temperatureEnabled && Number.isFinite(prefs.temperature)) creds.temperature = prefs.temperature;
+  return creds;
+}
+
+// One streaming chat turn. Resolves to {full, toolCalls} on success (toolCalls
+// is the native flattened [{id,name,arguments}] or null) or {error}. `onDelta`
+// receives streamed text chunks as they arrive.
+// `creds` carries the per-request {baseURL, apiKey, model, temperature?} chosen
+// from the model dropdown, so the host uses the right key+model (instead of a
+// single stored config).
+function requestAiChat(messages, tools, onDelta, creds) {
+  return new Promise((resolve) => {
+    const reqId = `ai-chat-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    if (onDelta) aiDeltaHandlers.set(reqId, onDelta);
+    try {
+      if (window.webkit?.messageHandlers?.aiChat) {
+        window.webkit.messageHandlers.aiChat.postMessage({ reqId, messages, tools, creds });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:ai-chat', { reqId, messages, tools, creds }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    aiDeltaHandlers.delete(reqId);
+    resolve({ error: 'No host bridge available' });
+  });
+}
+
+// Run a native-backed agent tool (search / list_dir / run_command / web_search).
+// Resolves to {ok, result}.
+function requestAiTool(name, args) {
+  return new Promise((resolve) => {
+    const reqId = `ai-tool-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.aiTool) {
+        window.webkit.messageHandlers.aiTool.postMessage({ reqId, name, args });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:ai-tool', { reqId, name, args }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve({ ok: false, result: 'No host bridge available' });
+  });
+}
+
+// Streamed text chunk for an in-flight chat turn.
+function onAiDelta(reqId, payload) {
+  const h = aiDeltaHandlers.get(reqId);
+  if (h && payload && typeof payload.text === 'string') h(payload.text);
+}
+
+function requestWriteFile(path, content) {
+  return new Promise((resolve) => {
+    const reqId = `wf-${(++aiSeq).toString(36)}`;
+    pendingAi.set(reqId, resolve);
+    try {
+      if (window.webkit?.messageHandlers?.writeFile) {
+        window.webkit.messageHandlers.writeFile.postMessage({ reqId, path, content });
+        return;
+      }
+    } catch {}
+    try {
+      const ev = window.__TAURI__?.event;
+      if (ev?.emit) { ev.emit('mdreader:write-file', { reqId, path, content }); return; }
+    } catch {}
+    pendingAi.delete(reqId);
+    resolve({ ok: false, error: 'No host bridge available' });
+  });
+}
+
+function resolveAi(reqId, value) {
+  aiDeltaHandlers.delete(reqId);
+  const r = pendingAi.get(reqId);
+  if (!r) return;
+  pendingAi.delete(reqId);
+  r(value);
+}
+
+// ===================================================================
+// Diff + robust edit application (shared by the AI agent's edit/write tools).
+// ===================================================================
+
+// LCS line diff → [{type:'ctx'|'add'|'del', text}]. Guards against O(n*m) blow-up
+// on very large files by falling back to a plain replace summary.
+function diffLines(oldText, newText) {
+  const a = String(oldText == null ? '' : oldText).split('\n');
+  const b = String(newText == null ? '' : newText).split('\n');
+  const n = a.length, m = b.length;
+  if (n * m > 4_000_000) {
+    return [{ type: 'note', text: `（文件较大，省略逐行对比：${n} 行 → ${m} 行）` }];
+  }
+  const dp = Array.from({ length: n + 1 }, () => new Uint32Array(m + 1));
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
+    }
+  }
+  const out = [];
+  let i = 0, j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) { out.push({ type: 'ctx', text: a[i] }); i++; j++; }
+    else if (dp[i + 1][j] >= dp[i][j + 1]) { out.push({ type: 'del', text: a[i] }); i++; }
+    else { out.push({ type: 'add', text: b[j] }); j++; }
+  }
+  while (i < n) out.push({ type: 'del', text: a[i++] });
+  while (j < m) out.push({ type: 'add', text: b[j++] });
+  return out;
+}
+
+// Collapse long unchanged runs to ±pad lines around each change.
+function collapseDiff(rows, pad = 3) {
+  const keep = new Array(rows.length).fill(false);
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].type !== 'ctx') {
+      for (let k = Math.max(0, i - pad); k <= Math.min(rows.length - 1, i + pad); k++) keep[k] = true;
+    }
+  }
+  const out = [];
+  let hidden = 0;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].type === 'note') { out.push(rows[i]); continue; }
+    if (keep[i]) {
+      if (hidden) { out.push({ type: 'gap', text: `⋯ ${hidden} 行未改动` }); hidden = 0; }
+      out.push(rows[i]);
+    } else { hidden++; }
+  }
+  if (hidden) out.push({ type: 'gap', text: `⋯ ${hidden} 行未改动` });
+  return out;
+}
+
+function buildDiffNode(oldText, newText) {
+  const node = document.createElement('div');
+  node.className = 'ai-diff';
+  const rows = collapseDiff(diffLines(oldText, newText));
+  const changed = rows.some((r) => r.type === 'add' || r.type === 'del');
+  if (!changed) { node.textContent = '（无变化）'; return node; }
+  for (const r of rows) {
+    const line = document.createElement('div');
+    line.className = `ai-diff-line ai-diff-${r.type}`;
+    const sign = r.type === 'add' ? '+ ' : r.type === 'del' ? '- ' : (r.type === 'ctx' ? '  ' : '');
+    line.textContent = sign + r.text;
+    node.appendChild(line);
+  }
+  return node;
+}
+
+function countOccurrences(haystack, needle) {
+  if (!needle) return 0;
+  let n = 0, idx = 0;
+  while ((idx = haystack.indexOf(needle, idx)) !== -1) { n++; idx += needle.length; }
+  return n;
+}
+
+// Apply an old→new edit robustly. Tries an exact match first; on miss, falls
+// back to a whitespace-tolerant line match (handles indentation / trailing-space
+// / CRLF drift — the usual reasons exact edits fail). Returns
+// {ok, text?, count?, error?}.
+function applyEditMatch(source, oldStr, newStr, replaceAll) {
+  if (oldStr == null || oldStr === '') return { ok: false, error: '`old` is empty' };
+  const text = String(source).replace(/\r\n/g, '\n');
+  const old = String(oldStr).replace(/\r\n/g, '\n');
+  const rep = String(newStr == null ? '' : newStr).replace(/\r\n/g, '\n');
+
+  const exact = countOccurrences(text, old);
+  if (exact > 0) {
+    if (!replaceAll && exact > 1) {
+      return { ok: false, error: `\`old\` appears ${exact} times; add more surrounding context to make it unique, or set replace_all=true.` };
+    }
+    // Replace literally — a function replacer avoids `$`-pattern interpretation.
+    const next = replaceAll ? text.split(old).join(rep) : text.replace(old, () => rep);
+    return { ok: true, text: next, count: replaceAll ? exact : 1 };
+  }
+
+  // Lenient: match a contiguous block of lines ignoring per-line surrounding ws.
+  const lines = text.split('\n');
+  const oldLines = old.replace(/\n$/, '').split('\n');
+  const norm = (s) => s.trim();
+  const oldNorm = oldLines.map(norm);
+  const starts = [];
+  for (let i = 0; i + oldNorm.length <= lines.length; i++) {
+    let hit = true;
+    for (let k = 0; k < oldNorm.length; k++) {
+      if (norm(lines[i + k]) !== oldNorm[k]) { hit = false; break; }
+    }
+    if (hit) { starts.push(i); if (!replaceAll) break; }
+  }
+  if (starts.length === 0) {
+    return { ok: false, error: '`old` text not found (even ignoring whitespace). Re-read the file and copy the exact text.' };
+  }
+  if (!replaceAll && starts.length > 1) {
+    return { ok: false, error: `\`old\` matches ${starts.length} blocks; add more context or set replace_all=true.` };
+  }
+  const repLines = rep.split('\n');
+  let result = lines.slice();
+  for (let s = starts.length - 1; s >= 0; s--) {
+    result.splice(starts[s], oldNorm.length, ...repLines);
+  }
+  return { ok: true, text: result.join('\n'), count: starts.length, lenient: true };
+}
+
+const AIPanel = (() => {
+  let built = false;
+  let config = normalizeAiConfig(null);   // new multi-provider shape
+  let activeSel = { auto: true };          // dropdown selection for this session
+  let convo = [];             // full OpenAI message array (source of truth)
+  let busy = false;
+  let approvalPolicy = 'ask'; // base policy from config (ask/allowEdits/allowAll)
+  let autoApprove = false;    // per-session "全部自动执行" override (toolbar toggle)
+  let streamText = '';        // live text of the turn currently streaming (or null)
+  let streaming = false;
+  let undoStack = [];         // [{path, prev}] — restore points for AI writes this session
+  let sessions = [];          // index metadata of this workspace's conversations (no messages)
+  let currentSessionId = null;// id of the conversation in `convo` (null until first send)
+  let historyKey = null;      // workspace key `sessions` was loaded for
+  let attachments = [];       // pending "@文件" references for the next send: [{path,name,dir}]
+  let currentTitle = null;    // AI-generated or user-set title for the current session (overrides deriveTitle)
+  let titleBusy = false;      // a title-generation request is in flight
+  let histOutsideHandler = null; // document listener that dismisses the history dropdown
+
+  // Unified line-style clock icon for the history button (replaces the 🕘 emoji).
+  const HISTORY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l2.5 2.5"/></svg>';
+
+  function panelEl() { return document.getElementById('ai-panel'); }
+
+  function wsKey() { return Sidebar.workspaceRoot() || 'default'; }
+
+  // Workspace pinning: when the open workspace changes, drop the in-memory
+  // conversation and reload that workspace's history. Sync part is immediate;
+  // the session list fills in asynchronously (only the 🕘 overlay needs it).
+  function syncWorkspace() {
+    const k = wsKey();
+    if (k === historyKey) return;
+    historyKey = k;
+    convo = []; currentSessionId = null; currentTitle = null; undoStack = []; updateUndoBtn();
+    sessions = [];
+    loadHistory();
+  }
+
+  async function loadHistory() {
+    const k = historyKey || wsKey();
+    let idx = null;
+    try { idx = await requestHistoryList('chat'); } catch {}
+    if (k !== historyKey) return; // workspace switched mid-load
+    sessions = (Array.isArray(idx) ? idx : []).filter((s) => s && s.workspace === k);
+  }
+
+  function deriveTitle() {
+    const u = convo.find((m) => m.role === 'user');
+    const t = ((u && String(u.content)) || '').trim().replace(/\s+/g, ' ');
+    if (!t) return '新对话';
+    return t.length > 48 ? t.slice(0, 48) + '…' : t;
+  }
+
+  // Write the current conversation to its own file and refresh the in-memory
+  // index entry. No-op until the user has sent at least one message (nothing
+  // worth keeping otherwise). `sessions` holds metadata only; the messages live
+  // in the per-id record file fetched lazily by loadSession.
+  function snapshotCurrent() {
+    if (!convo.some((m) => m.role === 'user')) return;
+    if (!currentSessionId) currentSessionId = fmtId();
+    const now = Date.now();
+    const i = sessions.findIndex((s) => s.id === currentSessionId);
+    const meta = {
+      id: currentSessionId,
+      workspace: historyKey || wsKey(),
+      title: currentTitle || deriveTitle(),
+      createdAt: i >= 0 ? sessions[i].createdAt : now,
+      updatedAt: now,
+    };
+    if (i >= 0) sessions[i] = meta; else sessions.unshift(meta);
+    try { requestHistoryWrite('chat', currentSessionId, { ...meta, messages: convo.slice() }); } catch {}
+  }
+
+  function ensure() {
+    if (!built) { build(); built = true; }
+    syncWorkspace();
+    requestAiGetConfig().then((cfg) => {
+      config = normalizeAiConfig(cfg);
+      approvalPolicy = config.prefs.approvalPolicy;
+      autoApprove = approvalPolicy === 'allowAll';
+      renderView();
+    });
+  }
+
+  // Live refresh when the settings window changes the AI config.
+  function onConfigChanged(cfg) {
+    config = normalizeAiConfig(cfg);
+    if (!busy) {
+      approvalPolicy = config.prefs.approvalPolicy;
+      autoApprove = approvalPolicy === 'allowAll';
+      // Keep the current selection if its model still exists; else Auto.
+      const all = aiAllModels(config);
+      if (activeSel && !activeSel.auto &&
+          !all.some((x) => x.providerId === activeSel.providerId && x.model === activeSel.model)) {
+        activeSel = { auto: true };
+      }
+      if (built) renderView();
+    }
+  }
+
+  function build() {
+    const p = panelEl();
+    if (!p) return;
+    // No header banner: settings/history/etc. live in the chat toolbar; the
+    // panel is opened/closed from the sidebar AI button.
+    p.innerHTML = '<div class="ai-body"></div>';
+  }
+
+  function body() { return panelEl()?.querySelector('.ai-body'); }
+
+  function hasModels() { return aiAllModels(config).length > 0; }
+
+  function renderView() {
+    closeHistory();
+    if (!hasModels()) renderEmpty();
+    else renderChat();
+  }
+
+  // No key/model configured yet → guide the user to settings.
+  function renderEmpty() {
+    const b = body();
+    if (!b) return;
+    b.innerHTML = `
+      <div class="ai-empty-setup">
+        <div class="ai-empty-glyph"><span class="ai-empty-orb">✦</span></div>
+        <div class="ai-empty-title">还没有配置 AI</div>
+        <div class="ai-empty-text">在「设置 → AI」里添加一个密钥和模型即可开始使用。密钥仅保存在本机。</div>
+        <button class="ai-btn primary" data-act="open-ai-settings" type="button">前往设置 → AI</button>
+      </div>`;
+    b.querySelector('[data-act=open-ai-settings]').addEventListener('click', () => requestOpenSettings('ai'));
+  }
+
+  function renderChat() {
+    const b = body();
+    if (!b) return;
+    b.innerHTML = `
+      <div class="ai-toolbar">
+        <label class="ai-auto" title="勾选后本次会话内的写入 / 命令全部不再确认（覆盖设置里的执行权限）">
+          <input type="checkbox" class="ai-auto-cb"${autoApprove ? ' checked' : ''}> 全部自动执行
+        </label>
+        <span class="ai-head-actions">
+          <button type="button" class="ai-icon-btn" data-act="history" title="历史对话" aria-label="历史对话">${HISTORY_ICON}</button>
+          <button type="button" class="ai-icon-btn" data-act="undo" title="撤销上次写入"${undoStack.length ? '' : ' disabled'}>↩</button>
+          <button type="button" class="ai-icon-btn" data-act="newchat" title="新对话（当前对话存入历史）">✚</button>
+          <button type="button" class="ai-icon-btn" data-act="settings" title="AI 设置" aria-label="设置">⚙</button>
+        </span>
+      </div>
+      <div class="ai-messages"></div>
+      <form class="ai-compose">
+        <div class="ai-compose-field">
+          <div class="ai-attach" hidden></div>
+          <textarea class="ai-input" rows="3" placeholder="交给我做点什么…（回车发送，Shift+回车换行）"></textarea>
+          <div class="ai-compose-bar">
+            <select class="ai-model-select" title="选择模型">${modelOptionsHTML()}</select>
+            <button type="submit" class="ai-send-btn" title="发送（回车）" aria-label="发送">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .65.65 1.1 1.39.91z"/></svg>
+            </button>
+          </div>
+        </div>
+      </form>`;
+    renderMessages();
+    const form = b.querySelector('.ai-compose');
+    const input = b.querySelector('.ai-input');
+    form.addEventListener('submit', (e) => { e.preventDefault(); send(input); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
+    });
+    b.querySelector('.ai-model-select').addEventListener('change', (e) => {
+      const v = e.target.value;
+      activeSel = v === '__auto__' ? { auto: true } : (() => {
+        const i = v.indexOf(':');
+        return { providerId: v.slice(0, i), model: v.slice(i + 1) };
+      })();
+    });
+    b.querySelector('.ai-auto-cb').addEventListener('change', (e) => { autoApprove = e.target.checked; });
+    b.querySelector('[data-act=undo]').addEventListener('click', () => undoLast());
+    b.querySelector('[data-act=newchat]').addEventListener('click', () => {
+      if (busy) return;
+      snapshotCurrent();                       // keep what's there before clearing
+      convo = []; currentSessionId = null; currentTitle = null; undoStack = []; updateUndoBtn();
+      closeHistory();
+      renderMessages();
+    });
+    b.querySelector('[data-act=history]').addEventListener('click', () => {
+      if (busy) return;
+      toggleHistory();
+    });
+    b.querySelector('[data-act=settings]').addEventListener('click', () => requestOpenSettings('ai'));
+    renderAttachments();
+    input.focus();
+  }
+
+  // ── "@文件": right-click → 添加到 AI. Files/dirs queued here are folded into
+  // the next user turn's API content (file bodies inlined, capped) while the
+  // visible bubble just shows compact 📎 chips. ──
+  function attachFile(path, isDir) {
+    if (!path) return;
+    const name = baseName(path);
+    if (!attachments.some((a) => a.path === path)) {
+      attachments.push({ path, name, dir: !!isDir });
+    }
+    const wasOpen = Panels.aiOpen();
+    if (!wasOpen) {
+      Panels.toggleAi();          // opens → PanelHooks.ai → ensure() → renderChat → renderAttachments
+    } else if (!built) {
+      ensure();
+    } else {
+      renderAttachments();
+    }
+    body()?.querySelector('.ai-input')?.focus();
+  }
+
+  function renderAttachments() {
+    const wrap = body()?.querySelector('.ai-attach');
+    if (!wrap) return;
+    wrap.innerHTML = '';
+    wrap.hidden = attachments.length === 0;
+    attachments.forEach((a, i) => {
+      const chip = document.createElement('span');
+      chip.className = 'ai-attach-chip';
+      chip.title = a.path;
+      const label = document.createElement('span');
+      label.className = 'ai-attach-name';
+      label.textContent = (a.dir ? '📁 ' : '📎 ') + a.name;
+      const x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'ai-attach-x';
+      x.setAttribute('aria-label', '移除');
+      x.textContent = '×';
+      x.addEventListener('click', () => { attachments.splice(i, 1); renderAttachments(); });
+      chip.appendChild(label);
+      chip.appendChild(x);
+      wrap.appendChild(chip);
+    });
+  }
+
+  // Read each queued file and fold it into the message text sent to the model
+  // (capped per file). Directories are referenced by path for the agent to
+  // browse with list_dir / search rather than inlined.
+  async function buildAttachedContent(text, atts) {
+    const parts = [];
+    for (const a of atts) {
+      if (a.dir) {
+        parts.push(`目录：${a.path}（请用 list_dir / search 浏览其中内容）`);
+        continue;
+      }
+      const r = await requestReadFile(a.path);
+      if (r && r.ok) {
+        parts.push(`文件：${a.path}\n\`\`\`\n${clip(r.text, 16000)}\n\`\`\``);
+      } else {
+        parts.push(`文件：${a.path}（读取失败，请用 read_file 自行读取）`);
+      }
+    }
+    const header = `用户附加了以下内容作为上下文：\n\n${parts.join('\n\n')}`;
+    return text ? `${header}\n\n---\n\n${text}` : header;
+  }
+
+  function baseName(p) { return String(p || '').split(/[\\/]/).pop() || String(p || ''); }
+  function clip(s, n) { s = String(s == null ? '' : s); return s.length > n ? s.slice(0, n) + '\n… (truncated)' : s; }
+
+  // <option>s for the chat model dropdown: Auto (= default model) + every
+  // configured (provider · model), with the current session selection marked.
+  function modelOptionsHTML() {
+    const all = aiAllModels(config);
+    const def = config.defaultModel;
+    const autoLabel = def ? `Auto（${def.model}）` : 'Auto';
+    const isAuto = !activeSel || activeSel.auto;
+    let html = `<option value="__auto__"${isAuto ? ' selected' : ''}>${escapeHtml(autoLabel)}</option>`;
+    for (const m of all) {
+      const val = `${m.providerId}:${m.model}`;
+      const on = !isAuto && activeSel.providerId === m.providerId && activeSel.model === m.model;
+      html += `<option value="${escapeHtml(val)}"${on ? ' selected' : ''}>${escapeHtml(m.provider)} · ${escapeHtml(m.model)}</option>`;
+    }
+    return html;
+  }
+
+  // Short, human-readable label for a tool step chip.
+  function toolStepLabel(name, argStr) {
+    let a = {};
+    try { a = JSON.parse(argStr || '{}'); } catch {}
+    switch (name) {
+      case 'read_file':   return `读取 ${baseName(a.path)}`;
+      case 'list_dir':    return `列目录 ${baseName(a.path) || '/'}`;
+      case 'search':      return `搜索 “${a.query || ''}”`;
+      case 'edit_file':   return `编辑 ${baseName(a.path)}`;
+      case 'write_file':  return `写入 ${baseName(a.path)}`;
+      case 'run_command': return `运行 ${String(a.command || '').slice(0, 60)}`;
+      case 'web_search':  return `联网搜索 “${a.query || ''}”`;
+      default:            return name;
+    }
+  }
+
+  function bubbleRow(role, text) {
+    const row = document.createElement('div');
+    row.className = `ai-msg ai-msg-${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'ai-bubble';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    return row;
+  }
+
+  // The 📎 chips shown under a sent user turn that carried "@文件" attachments.
+  function sentAttachRow(atts) {
+    const row = document.createElement('div');
+    row.className = 'ai-msg ai-msg-user ai-msg-attach';
+    for (const a of atts) {
+      const chip = document.createElement('span');
+      chip.className = 'ai-attach-chip is-sent';
+      chip.title = a.path;
+      chip.textContent = (a.dir ? '📁 ' : '📎 ') + a.name;
+      row.appendChild(chip);
+    }
+    return row;
+  }
+
+  // A collapsible tool-step chip; shows the args and (once it arrives) the result.
+  function stepRow(tc, result) {
+    const row = document.createElement('div');
+    row.className = 'ai-msg ai-msg-tool';
+    const det = document.createElement('details');
+    det.className = 'ai-step';
+    const done = result != null;
+    const sum = document.createElement('summary');
+    sum.className = 'ai-step-sum';
+    sum.textContent = `${done ? '✓' : '⋯'} ${toolStepLabel(tc.function?.name, tc.function?.arguments)}`;
+    det.appendChild(sum);
+    const pre = document.createElement('pre');
+    pre.className = 'ai-step-body';
+    const argStr = tc.function?.arguments || '';
+    pre.textContent = (argStr ? `args: ${argStr}\n\n` : '') + (done ? String(result) : '运行中…');
+    det.appendChild(pre);
+    row.appendChild(det);
+    return row;
+  }
+
+  function renderMessages() {
+    const list = body()?.querySelector('.ai-messages');
+    if (!list) return;
+    list.innerHTML = '';
+    const hasUser = convo.some((m) => m.role === 'user');
+    if (!hasUser && !streaming) {
+      list.innerHTML = `
+        <div class="ai-empty">
+          <div class="ai-empty-orb">✦</div>
+          <div class="ai-empty-h">让我帮你处理整个工作区</div>
+          <div class="ai-empty-sub">读 · 搜 · 改 · 写 · 跑命令 · 查资料，都行。</div>
+          <div class="ai-empty-chips">
+            <button type="button" class="ai-chip" data-fill="把 README 翻译成英文并写回">把 README 翻译成英文并写回</button>
+            <button type="button" class="ai-chip" data-fill="在 src 里找用到 foo 的地方并修掉">在 src 里找用到 foo 的地方并修掉</button>
+          </div>
+        </div>`;
+      list.querySelectorAll('.ai-chip').forEach((chip) => {
+        chip.addEventListener('click', () => {
+          const input = body()?.querySelector('.ai-input');
+          if (!input) return;
+          input.value = chip.dataset.fill || '';
+          input.focus();
+        });
+      });
+    }
+    const results = {};
+    for (const m of convo) if (m.role === 'tool') results[m.tool_call_id] = m.content;
+    for (const m of convo) {
+      if (m.role === 'user') {
+        if (m.content) list.appendChild(bubbleRow('user', m.content));
+        if (m._attach && m._attach.length) list.appendChild(sentAttachRow(m._attach));
+      } else if (m.role === 'assistant') {
+        if (m.content) list.appendChild(bubbleRow('assistant', m.content));
+        if (m.tool_calls) for (const tc of m.tool_calls) list.appendChild(stepRow(tc, results[tc.id]));
+      }
+    }
+    if (streaming) {
+      const row = document.createElement('div');
+      row.className = 'ai-msg ai-msg-assistant';
+      const bubble = document.createElement('div');
+      bubble.className = 'ai-bubble';
+      bubble.id = 'ai-live-bubble';
+      if (streamText) bubble.textContent = streamText;
+      else bubble.innerHTML = '<span class="ai-typing"><span></span><span></span><span></span></span>';
+      row.appendChild(bubble);
+      list.appendChild(row);
+    }
+    list.scrollTop = list.scrollHeight;
+  }
+
+  async function send(input) {
+    const text = (input.value || '').trim();
+    const atts = attachments.slice();
+    if ((!text && !atts.length) || busy) return;
+    if (!hasModels()) { renderEmpty(); return; }
+    input.value = '';
+    attachments = [];
+    renderAttachments();
+    const msg = { role: 'user', content: text };
+    if (atts.length) {
+      msg._attach = atts.map((a) => ({ path: a.path, name: a.name, dir: a.dir }));
+      msg._apiContent = await buildAttachedContent(text, atts);
+    }
+    convo.push(msg);
+    await runAgent();
+  }
+
+  // The agent loop: stream a turn, append it, run any requested tools, repeat
+  // until the model stops calling tools (or we hit the step cap).
+  async function runAgent() {
+    busy = true;
+    const maxSteps = (config.prefs && config.prefs.maxSteps) || 24;
+    const creds = aiResolveCreds(config, activeSel);
+    if (!creds) {
+      convo.push({ role: 'assistant', content: '⚠️ 当前选择的模型缺少地址或密钥，请在 设置 → AI 检查。' });
+      busy = false; renderMessages(); return;
+    }
+    try {
+      for (let step = 0; step < maxSteps; step++) {
+        streaming = true; streamText = '';
+        renderMessages();
+        const res = await requestAiChat(buildApiMessages(), aiToolSpecs(), (t) => {
+          streamText += t;
+          const el = document.getElementById('ai-live-bubble');
+          if (el) el.textContent = streamText;
+          const list = body()?.querySelector('.ai-messages');
+          if (list) list.scrollTop = list.scrollHeight;
+        }, creds);
+        streaming = false;
+        if (!res || res.error) {
+          convo.push({ role: 'assistant', content: `⚠️ ${(res && res.error) || '请求失败'}` });
+          break;
+        }
+        const tcs = Array.isArray(res.toolCalls) ? res.toolCalls : null;
+        const asst = { role: 'assistant', content: res.full || '' };
+        if (tcs && tcs.length) {
+          asst.tool_calls = tcs.map((tc) => ({
+            id: tc.id, type: 'function',
+            function: { name: tc.name, arguments: tc.arguments },
+          }));
+        }
+        convo.push(asst);
+        renderMessages();
+        if (!tcs || !tcs.length) break;
+        for (const tc of tcs) {
+          let args = {};
+          try { args = JSON.parse(tc.arguments || '{}'); } catch {}
+          const result = await executeAiTool(tc.name, args);
+          convo.push({ role: 'tool', tool_call_id: tc.id, content: clip(result, 16000) });
+          renderMessages();
+        }
+      }
+    } finally {
+      busy = false; streaming = false;
+      renderMessages();
+      try { snapshotCurrent(); } catch {}
+      try { maybeGenerateTitle(); } catch {}
+    }
+  }
+
+  function buildApiMessages() {
+    const msgs = [{ role: 'system', content: AI_SYSTEM_PROMPT }];
+    const extra = (config.prefs && config.prefs.systemPrompt || '').trim();
+    if (extra) msgs.push({ role: 'system', content: extra });
+    const root = Sidebar.workspaceRoot();
+    const f = aiActiveFile();
+    let note = '';
+    if (root) note += `Workspace root: ${root}\n`;
+    if (f.path) note += `Currently open file: ${f.path}${f.editable ? '' : ' (binary/non-text)'}\n`;
+    if (note) msgs.push({ role: 'system', content: note.trim() });
+    for (const m of convo) {
+      // Strip private "@文件" fields; user turns send the attachment-expanded body.
+      const { _attach, _apiContent, ...clean } = m;
+      if (m.role === 'user' && _apiContent) clean.content = _apiContent;
+      msgs.push(clean);
+    }
+    return msgs;
+  }
+
+  // run_command et al. — only auto-approved when "allow all" (config or session).
+  async function confirmMutation(title, message, danger) {
+    if (autoApprove || approvalPolicy === 'allowAll') return true;
+    return showModal({ title, message, confirmLabel: '执行', danger: !!danger });
+  }
+
+  // Confirm a file write by showing the actual diff. Auto-applied when the
+  // policy allows edits (or all), or the session "全部自动执行" toggle is on.
+  async function confirmWrite(path, oldText, newText, verb) {
+    if (autoApprove || approvalPolicy === 'allowEdits' || approvalPolicy === 'allowAll') return true;
+    return showModal({
+      title: `${verb} ${baseName(path)}`,
+      message: path,
+      bodyNode: buildDiffNode(oldText, newText),
+      confirmLabel: '应用',
+      danger: true,
+      wide: true,
+    });
+  }
+
+  // Write + record an undo restore point + refresh the view.
+  async function commitWrite(path, newText, oldText, okMsg) {
+    const w = await requestWriteFile(path, newText);
+    if (!(w && w.ok)) return `Error: write failed: ${(w && w.error) || ''}`;
+    undoStack.push({ path, prev: oldText });
+    updateUndoBtn();
+    refreshViewForPath(path, newText);
+    return okMsg;
+  }
+
+  async function undoLast() {
+    if (busy) return;
+    const last = undoStack.pop();
+    updateUndoBtn();
+    if (!last) { showToast('无可撤销的写入', 'info'); return; }
+    const w = await requestWriteFile(last.path, last.prev);
+    if (w && w.ok) {
+      refreshViewForPath(last.path, last.prev);
+      showToast(`已撤销对 ${baseName(last.path)} 的写入`, 'info');
+    } else {
+      showToast(`撤销失败：${(w && w.error) || ''}`, 'error');
+    }
+  }
+
+  function updateUndoBtn() {
+    const btn = panelEl()?.querySelector('[data-act=undo]');
+    if (btn) btn.disabled = undoStack.length === 0;
+  }
+
+  // ---- History overlay (past conversations for this workspace) -------------
+
+  function relTime(ts) {
+    const m = Math.floor((Date.now() - (ts || 0)) / 60000);
+    if (m < 1) return '刚刚';
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} 小时前`;
+    const days = Math.floor(h / 24);
+    if (days < 30) return `${days} 天前`;
+    const mo = Math.floor(days / 30);
+    return mo < 12 ? `${mo} 个月前` : `${Math.floor(mo / 12)} 年前`;
+  }
+
+  function historyEl() { return panelEl()?.querySelector('.ai-history'); }
+  function closeHistory() {
+    const o = historyEl(); if (o) o.remove();
+    if (histOutsideHandler) {
+      document.removeEventListener('mousedown', histOutsideHandler, true);
+      histOutsideHandler = null;
+    }
+  }
+  function toggleHistory() { if (historyEl()) closeHistory(); else openHistory(); }
+
+  async function openHistory() {
+    await loadHistory();              // fetch fresh for the current workspace
+    const p = panelEl();
+    if (!p) return;
+    closeHistory();
+    const o = document.createElement('div');
+    o.className = 'ai-history';
+    p.appendChild(o);
+    renderHistory();
+    // Dropdown behaviour: dismiss on any click outside the list (the history
+    // button's own handler toggles it shut, so ignore clicks on it).
+    histOutsideHandler = (e) => {
+      const el = historyEl();
+      if (!el || el.contains(e.target)) return;
+      if (e.target.closest && e.target.closest('[data-act=history]')) return;
+      closeHistory();
+    };
+    document.addEventListener('mousedown', histOutsideHandler, true);
+  }
+
+  function renderHistory() {
+    const o = historyEl();
+    if (!o) return;
+    const list = sessions.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    let rows = '';
+    if (!list.length) {
+      rows = '<div class="ai-history-empty">还没有历史对话</div>';
+    } else {
+      for (const s of list) {
+        const cur = s.id === currentSessionId ? ' current' : '';
+        rows += `<div class="ai-history-row${cur}" data-id="${escapeHtml(s.id)}">`
+          + `<div class="ai-history-main"><div class="ai-history-title" title="双击重命名">${escapeHtml(s.title || '新对话')}</div>`
+          + `<div class="ai-history-meta">${escapeHtml(relTime(s.updatedAt))}</div></div>`
+          + `<span class="ai-history-actions">`
+          + `<button type="button" class="ai-history-rename" title="重命名" data-id="${escapeHtml(s.id)}">✎</button>`
+          + `<button type="button" class="ai-history-del" title="删除" data-id="${escapeHtml(s.id)}">🗑</button>`
+          + `</span></div>`;
+      }
+    }
+    o.innerHTML = `
+      <div class="ai-history-head">
+        <span>历史对话</span>
+        <button type="button" class="ai-icon-btn" data-act="close-history" title="关闭">×</button>
+      </div>
+      <div class="ai-history-list">${rows}</div>`;
+    o.querySelector('[data-act=close-history]').addEventListener('click', () => closeHistory());
+    o.querySelectorAll('.ai-history-del').forEach((btn) => {
+      btn.addEventListener('click', (e) => { e.stopPropagation(); deleteSession(btn.dataset.id); });
+    });
+    o.querySelectorAll('.ai-history-rename').forEach((btn) => {
+      btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const row = btn.closest('.ai-history-row');
+        beginHistRename(row && row.querySelector('.ai-history-title'), btn.dataset.id);
+      });
+    });
+    o.querySelectorAll('.ai-history-row').forEach((row) => {
+      row.addEventListener('click', () => loadSession(row.dataset.id));
+      const tEl = row.querySelector('.ai-history-title');
+      if (tEl) tEl.addEventListener('dblclick', (e) => { e.stopPropagation(); beginHistRename(tEl, row.dataset.id); });
+    });
+  }
+
+  // Inline-rename a history row's title. Enter / blur saves, Esc cancels.
+  function beginHistRename(titleEl, id) {
+    if (!titleEl || titleEl.querySelector('input')) return;
+    const old = titleEl.textContent;
+    const inp = document.createElement('input');
+    inp.type = 'text';
+    inp.className = 'ai-history-edit';
+    inp.value = old;
+    titleEl.textContent = '';
+    titleEl.appendChild(inp);
+    inp.focus(); inp.select();
+    let done = false;
+    const finish = (save) => {
+      if (done) return; done = true;
+      if (save) renameSession(id, inp.value);
+      else renderHistory();
+    };
+    inp.addEventListener('click', (e) => e.stopPropagation());
+    inp.addEventListener('dblclick', (e) => e.stopPropagation());
+    inp.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    });
+    inp.addEventListener('blur', () => finish(true));
+  }
+
+  // Persist a manual title change. For the open session we just set currentTitle
+  // (snapshotCurrent writes it); otherwise we rewrite that conversation's record.
+  async function renameSession(id, raw) {
+    const t = String(raw == null ? '' : raw).trim().replace(/\s+/g, ' ').slice(0, 40);
+    const i = sessions.findIndex((x) => x.id === id);
+    if (i < 0) { renderHistory(); return; }
+    if (!t || t === sessions[i].title) { renderHistory(); return; }
+    sessions[i] = { ...sessions[i], title: t };
+    if (id === currentSessionId) {
+      currentTitle = t;
+      try { snapshotCurrent(); } catch {}
+    } else {
+      let rec = null;
+      try { rec = await requestHistoryRead('chat', id); } catch {}
+      const messages = rec && Array.isArray(rec.messages) ? rec.messages : [];
+      try { requestHistoryWrite('chat', id, { ...sessions[i], messages }); } catch {}
+    }
+    renderHistory();
+  }
+
+  // After the first full Q&A round, ask the model for a short title (once).
+  // currentTitle (set here or by a manual rename / loaded session) suppresses
+  // re-generation. Fire-and-forget: it re-snapshots + refreshes when it lands.
+  async function maybeGenerateTitle() {
+    if (titleBusy || currentTitle || !currentSessionId) return;
+    const hasUser = convo.some((m) => m.role === 'user');
+    const hasAsst = convo.some((m) => m.role === 'assistant' && m.content && !String(m.content).startsWith('⚠️'));
+    if (!hasUser || !hasAsst) return;
+    const creds = aiResolveCreds(config, activeSel);
+    if (!creds) return;
+    titleBusy = true;
+    const parts = [];
+    for (const m of convo) {
+      if (m.role === 'user') parts.push('用户：' + String(m.content || '').slice(0, 600));
+      else if (m.role === 'assistant' && m.content) parts.push('助手：' + String(m.content).slice(0, 600));
+      if (parts.length >= 4) break;
+    }
+    const messages = [
+      { role: 'system', content: '你是会话标题生成器。根据对话内容，用一句不超过 16 个汉字（或 6 个英文单词）的简短短语概括主题作为标题。只输出标题本身：不要引号、不要句末标点、不要解释。' },
+      { role: 'user', content: parts.join('\n') },
+    ];
+    let res = null;
+    try { res = await requestAiChat(messages, [], null, creds); } catch {}
+    titleBusy = false;
+    if (!res || res.error) return;
+    if (currentTitle || !currentSessionId) return;   // a manual rename / new chat won the race
+    let t = String(res.full || '').split('\n')[0].trim();
+    t = t.replace(/^["'\u201c\u201d\u300e\u300c\u300f\u300d[(\uff08]+/, '').replace(/["'\u201c\u201d\u300f\u300d\u300e\u300c\])\uff09\u3002.!?\uff01\uff1f]+$/, '').trim().slice(0, 40);
+    if (!t) return;
+    currentTitle = t;
+    const idx = sessions.findIndex((s) => s.id === currentSessionId);
+    if (idx >= 0) sessions[idx] = { ...sessions[idx], title: t };
+    try { snapshotCurrent(); } catch {}
+    renderHistory();
+  }
+
+  async function loadSession(id) {
+    if (busy) return;
+    if (!sessions.some((x) => x.id === id)) return;
+    snapshotCurrent();                 // save the open conversation first
+    let rec = null;
+    try { rec = await requestHistoryRead('chat', id); } catch {}
+    if (!rec) return;
+    convo = Array.isArray(rec.messages) ? rec.messages.slice() : [];
+    currentSessionId = id;
+    currentTitle = (rec.title || (sessions.find((x) => x.id === id) || {}).title) || null;
+    undoStack = []; updateUndoBtn();
+    closeHistory();
+    renderMessages();
+  }
+
+  async function deleteSession(id) {
+    const s = sessions.find((x) => x.id === id);
+    const ok = await showModal({
+      title: '删除历史对话',
+      message: `确定删除「${(s && s.title) || '新对话'}」？此操作不可撤销。`,
+      confirmLabel: '删除', danger: true,
+    });
+    if (!ok) return;
+    sessions = sessions.filter((x) => x.id !== id);
+    if (id === currentSessionId) currentSessionId = null;
+    try { requestHistoryDelete('chat', id); } catch {}
+    renderHistory();
+  }
+
+  // Tool dispatch. Returns a plain string fed back to the model as the tool
+  // result. Read-only tools run silently; mutating tools go through a confirm.
+  async function executeAiTool(name, args) {
+    try {
+      switch (name) {
+        case 'read_file': {
+          if (!args.path) return 'Error: missing path';
+          const r = await requestReadFile(args.path);
+          return r && r.ok ? clip(r.text, 60000) : `Error: ${(r && r.error) || 'read failed'}`;
+        }
+        case 'list_dir': {
+          const r = await requestAiTool('list_dir', { path: args.path || Sidebar.workspaceRoot() || '' });
+          return r.result;
+        }
+        case 'search': {
+          const r = await requestAiTool('search', {
+            query: args.query || '', path: args.path || Sidebar.workspaceRoot() || '',
+          });
+          return r.result;
+        }
+        case 'edit_file':   return applyEditTool(args);
+        case 'write_file':  return applyWriteTool(args);
+        case 'run_command': return runCommandTool(args);
+        case 'web_search': {
+          const r = await requestAiTool('web_search', { query: args.query || '' });
+          return r.result;
+        }
+        default: return `Error: unknown tool ${name}`;
+      }
+    } catch (e) {
+      return `Error: ${(e && e.message) || e}`;
+    }
+  }
+
+  async function applyEditTool({ path, old, new: rep, replace_all }) {
+    if (!path || old == null) return 'Error: missing path or old';
+    const r = await requestReadFile(path);
+    if (!r || !r.ok) return `Error: cannot read ${path}: ${(r && r.error) || ''}`;
+    const m = applyEditMatch(r.text, old, rep, !!replace_all);
+    if (!m.ok) return `Error: ${m.error}`;
+    if (m.text === String(r.text).replace(/\r\n/g, '\n')) {
+      return 'No change (old and new are identical).';
+    }
+    if (!(await confirmWrite(path, r.text, m.text, '编辑'))) return 'User declined the edit.';
+    const note = `${m.count} replacement${m.count > 1 ? 's' : ''}${m.lenient ? ', whitespace-tolerant' : ''}`;
+    return commitWrite(path, m.text, r.text, `Edited ${path} (${note}).`);
+  }
+
+  async function applyWriteTool({ path, content }) {
+    if (!path) return 'Error: missing path';
+    const r = await requestReadFile(path);
+    const oldText = r && r.ok ? r.text : '';
+    const newText = content || '';
+    const verb = r && r.ok ? '覆盖' : '新建';
+    if (!(await confirmWrite(path, oldText, newText, verb))) return 'User declined the write.';
+    return commitWrite(path, newText, oldText, `Wrote ${path}.`);
+  }
+
+  async function runCommandTool({ command, cwd }) {
+    if (!command) return 'Error: missing command';
+    if (!(await confirmMutation('运行命令', `AI 想运行命令：\n\n${command}`, true))) {
+      return 'User declined the command.';
+    }
+    const r = await requestAiTool('run_command', { command, cwd: cwd || Sidebar.workspaceRoot() || '' });
+    return r.result;
+  }
+
+  // Reflect a tool's write in the view if it touched the file currently shown.
+  function refreshViewForPath(path, content) {
+    const f = aiActiveFile();
+    if (f.path === path) refreshAfterWrite(f, content);
+  }
+
+  return { ensure, onConfigChanged, attachFile };
+})();
+
+// The file the AI should read as context and write edits to: the previewed
+// non-md file if one is showing, else the open markdown document. Only text-ish
+// files are "editable" (md / code-text / html) — images, video, binaries aren't.
+function aiActiveFile() {
+  const preview = Sidebar.activePreview();
+  if (preview) {
+    const k = previewKind(preview);
+    return { path: preview, kind: k, editable: k === 'text' || k === 'html' };
+  }
+  const mdPath = Sidebar.currentFilePath();
+  if (mdPath) return { path: mdPath, kind: 'md', editable: true };
+  return { path: null, kind: null, editable: false };
+}
+
+// Immediately reflect an applied edit in the view (don't wait on the FS
+// watcher). The native watcher also fires and is deduped.
+function refreshAfterWrite(f, content) {
+  if (f.kind === 'md') {
+    render(content, lastBaseDir);
+  } else if (f.kind === 'text') {
+    renderTextPreview({ path: f.path, name: f.path.split(/[\\/]/).pop() }, content);
+  } else if (f.kind === 'html') {
+    const frame = document.querySelector('#root .preview-frame');
+    if (frame) frame.src = frame.src; // reload the iframe from disk
+  }
+}
+
+PanelHooks.ai = () => AIPanel.ensure();
+
+// ===================================================================
+// Terminal — real interactive PTY (xterm.js front, native PTY back). The
+// xterm bundle is loaded on demand the first time the panel opens. Bytes flow
+// as utf8 strings over IPC; the native side spawns/owns the pty keyed by id.
+// ===================================================================
+
+let termBundleLoaded = false;
+async function ensureTermBundle() {
+  if (termBundleLoaded) return;
+  if (!document.getElementById('xterm-css')) {
+    const link = document.createElement('link');
+    link.id = 'xterm-css';
+    link.rel = 'stylesheet';
+    link.href = 'vendor/xterm.css';
+    document.head.appendChild(link);
+  }
+  const script = document.createElement('script');
+  script.src = 'vendor/terminal.bundle.js';
+  await new Promise((res, rej) => {
+    script.onload = res;
+    script.onerror = rej;
+    document.head.appendChild(script);
+  });
+  termBundleLoaded = true;
+}
+
+// id → xterm Terminal, so native onTermData/onTermExit can find their target.
+const termSessions = new Map();
+
+function termEmit(handler, event, payload) {
+  try {
+    if (window.webkit?.messageHandlers?.[handler]) {
+      window.webkit.messageHandlers[handler].postMessage(payload);
+      return;
+    }
+  } catch {}
+  try {
+    const ev = window.__TAURI__?.event;
+    if (ev?.emit) ev.emit(event, payload);
+  } catch {}
+}
+const requestTermCreate = (id, cols, rows, cwd) => termEmit('termCreate', 'mdreader:term-create', { id, cols, rows, cwd });
+const requestTermInput  = (id, data)            => termEmit('termInput',  'mdreader:term-input',  { id, data });
+const requestTermResize = (id, cols, rows)      => termEmit('termResize', 'mdreader:term-resize', { id, cols, rows });
+const requestTermKill   = (id)                  => termEmit('termKill',   'mdreader:term-kill',   { id });
+
+function onTermData(id, data) {
+  const t = termSessions.get(id);
+  if (t) t.write(data);
+  try { TerminalPanel.afterOutput(id, data); } catch {}
+}
+function onTermExit(id, code) {
+  const t = termSessions.get(id);
+  if (t) t.write(`\r\n\x1b[90m[process exited${code != null ? ` (${code})` : ''}]\x1b[0m\r\n`);
+  try { TerminalPanel.markExit(id); } catch {}
+}
+
+// Derive the xterm palette from the active theme's CSS variables so the
+// terminal tracks any named theme, not just light/dark.
+function termTheme() {
+  const cs = getComputedStyle(document.documentElement);
+  const v = (name, fallback) => (cs.getPropertyValue(name).trim() || fallback);
+  const bg = v('--bg', '#0d1117');
+  const fg = v('--fg', '#e6edf3');
+  const accent = v('--accent', fg);
+  return {
+    background: bg,
+    foreground: fg,
+    cursor: accent,
+    cursorAccent: bg,
+    selectionBackground: v('--sidebar-current', 'rgba(128,128,128,0.3)'),
+  };
+}
+
+// Multi-session terminal: a left rail lists sessions (new / rename / delete),
+// the right pane shows the active one. The native side already keys PTYs by id,
+// so each session is just another id; switching only toggles which host shows.
+const TerminalPanel = (() => {
+  // id -> { id, name, term, fit, host, ro, tab, exited }
+  const sessions = new Map();
+  let activeId = null;
+  let seq = 0;
+  let built = false;
+  let listEl = null;   // .term-tabs container (left rail)
+  let mainEl = null;   // .term-main host container (right pane)
+  let termCommands = [];      // [{cmd, count, lastUsed}] learned for this workspace
+  let termHistoryKey = null;  // workspace key `termCommands` was loaded for
+  let termAll = {};           // full { "<workspace>": commands[] } map (one native record)
+
+  function build() {
+    const panel = document.getElementById('terminal-panel');
+    if (!panel) return false;
+    panel.innerHTML = `
+      <div class="term-side">
+        <div class="term-side-head">
+          <span class="term-side-title">终端</span>
+          <button class="term-new" title="新建终端" aria-label="新建终端">+</button>
+        </div>
+        <div class="term-tabs"></div>
+      </div>
+      <div class="term-side-resize" title="拖动调整宽度"></div>
+      <div class="term-main"></div>`;
+    listEl = panel.querySelector('.term-tabs');
+    mainEl = panel.querySelector('.term-main');
+    const sideEl = panel.querySelector('.term-side');
+    const savedW = parseInt(localStorage.getItem('mdgem.term.sideWidth') || '', 10);
+    if (sideEl && Number.isFinite(savedW)) {
+      sideEl.style.flexBasis = `${Math.max(110, Math.min(360, savedW))}px`;
+    }
+    panel.querySelector('.term-new').addEventListener('click', () => create());
+    initSideResize(panel);
+    built = true;
+    return true;
+  }
+
+  async function ensure() {
+    try {
+      await ensureTermBundle();
+    } catch {
+      const p = document.getElementById('terminal-panel');
+      if (p) p.innerHTML = '<div class="term-error">无法加载终端组件</div>';
+      return;
+    }
+    if (!window.MDTerm) return;
+    if (!built && !build()) return;
+    if (sessions.size === 0) create();
+    else fitAndResize();
+  }
+
+  function create() {
+    if (!built || !window.MDTerm) return;
+    const { Terminal, FitAddon, Unicode11Addon, WebglAddon } = window.MDTerm;
+    seq += 1;
+    const id = `t-${Date.now().toString(36)}-${seq.toString(36)}-${Math.floor(performance.now()).toString(36)}`;
+    // Name new terminals after the current workspace folder (IDE-style) rather
+    // than a bare counter; disambiguate duplicates with a numeric suffix.
+    const base = (Sidebar.workspaceRoot() || '').split(/[\\/]/).filter(Boolean).pop() || '终端';
+    let name = base;
+    const taken = new Set([...sessions.values()].map((s) => s.name));
+    for (let n = 2; taken.has(name); n++) name = `${base} ${n}`;
+
+    const host = document.createElement('div');
+    host.className = 'term-host';
+    host.dataset.id = id;
+    mainEl.appendChild(host);
+
+    const term = new Terminal({
+      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
+      fontSize: uiSettings.fontTerminal || 13,
+      lineHeight: 1.0,
+      letterSpacing: 0,
+      cursorBlink: true,
+      allowProposedApi: true,   // required by the unicode addon below
+      theme: termTheme(),
+    });
+    // Unicode 11 width tables so emoji / box-drawing measure like a real
+    // terminal — without this Claude CLI's frames and glyphs shift out of line.
+    try {
+      if (Unicode11Addon) {
+        term.loadAddon(new Unicode11Addon());
+        term.unicode.activeVersion = '11';
+      }
+    } catch {}
+    const fit = new FitAddon();
+    term.loadAddon(fit);
+    term.open(host);
+    // GPU renderer: integer-aligned cells so box lines actually connect, and far
+    // cheaper redraws for busy TUIs. Fall back to the DOM renderer on failure.
+    try {
+      if (WebglAddon) {
+        const webgl = new WebglAddon();
+        webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
+        term.loadAddon(webgl);
+      }
+    } catch {}
+    term.onData((d) => handleTermInput(id, d));
+    term.onRender(() => { try { refreshGhost(id); } catch {} });
+    // Shift+Enter → ESC+CR. xterm sends a plain \r for both Enter and
+    // Shift+Enter; this makes Shift+Enter insert a newline in Claude Code /
+    // Codex (they read ESC+Enter, i.e. Option+Enter, as "newline") instead of
+    // submitting. Returning false stops xterm from also sending the bare \r.
+    term.attachCustomKeyEventHandler((ev) => {
+      if (ev.type === 'keydown' && ev.key === 'Enter'
+          && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
+        ev.preventDefault();
+        requestTermInput(id, '\x1b\r');
+        return false;
+      }
+      return true;
+    });
+
+    // Floating dim "ghost" suggestion drawn over the grid at the cursor.
+    const ghostEl = document.createElement('div');
+    ghostEl.className = 'term-ghost';
+    ghostEl.style.display = 'none';
+    host.appendChild(ghostEl);
+
+    const tab = document.createElement('div');
+    tab.className = 'term-tab';
+    tab.dataset.id = id;
+    tab.innerHTML = '<span class="term-tab-name"></span><button class="term-tab-del" title="关闭终端" aria-label="关闭终端">×</button>';
+    const nameEl = tab.querySelector('.term-tab-name');
+    nameEl.textContent = name;
+    tab.addEventListener('click', (e) => {
+      if (e.target.closest('.term-tab-del')) return;
+      activate(id);
+    });
+    nameEl.addEventListener('dblclick', (e) => { e.stopPropagation(); beginRename(id); });
+    tab.querySelector('.term-tab-del').addEventListener('click', (e) => {
+      e.stopPropagation();
+      remove(id);
+    });
+    listEl.appendChild(tab);
+
+    const ro = new ResizeObserver(() => { if (id === activeId) fitAndResize(); });
+    ro.observe(host);
+
+    termSessions.set(id, term);
+    sessions.set(id, {
+      id, name, term, fit, host, ro, tab, exited: false, ghostEl,
+      track: { line: '', alt: false, disabled: false, suggest: '', modes: new Set() },
+    });
+    ensureTermHistory();
+
+    activate(id);
+    // Fit once the host has real dimensions, then spawn the pty at that size.
+    requestAnimationFrame(() => {
+      try { fit.fit(); } catch {}
+      requestTermCreate(id, term.cols || 80, term.rows || 24, Sidebar.workspaceRoot() || '');
+    });
+  }
+
+  function activate(id) {
+    const s = sessions.get(id);
+    if (!s) return;
+    activeId = id;
+    for (const other of sessions.values()) {
+      const on = other.id === id;
+      other.host.classList.toggle('active', on);
+      other.tab.classList.toggle('active', on);
+    }
+    fitAndResize();
+    try { s.term.focus(); } catch {}
+  }
+
+  function remove(id) {
+    const s = sessions.get(id);
+    if (!s) return;
+    requestTermKill(id);
+    try { s.ro.disconnect(); } catch {}
+    try { s.term.dispose(); } catch {}
+    s.host.remove();
+    s.tab.remove();
+    sessions.delete(id);
+    termSessions.delete(id);
+    if (activeId === id) {
+      activeId = null;
+      const next = sessions.keys().next().value;
+      if (next) activate(next);
+    }
+  }
+
+  function beginRename(id) {
+    const s = sessions.get(id);
+    if (!s || s.tab.querySelector('.term-tab-edit')) return;
+    const nameEl = s.tab.querySelector('.term-tab-name');
+    if (!nameEl) return;
+    const input = document.createElement('input');
+    input.className = 'term-tab-edit';
+    input.value = s.name;
+    nameEl.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    const commit = (keep) => {
+      if (done) return;
+      done = true;
+      if (keep) {
+        const v = input.value.trim();
+        if (v) s.name = v;
+      }
+      const span = document.createElement('span');
+      span.className = 'term-tab-name';
+      span.textContent = s.name;
+      span.addEventListener('dblclick', (e) => { e.stopPropagation(); beginRename(id); });
+      input.replaceWith(span);
+    };
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); commit(true); }
+      else if (e.key === 'Escape') { e.preventDefault(); commit(false); }
+    });
+    input.addEventListener('blur', () => commit(true));
+    input.addEventListener('click', (e) => e.stopPropagation());
+  }
+
+  function markExit(id) {
+    const s = sessions.get(id);
+    if (!s) return;
+    s.exited = true;
+    s.tab.classList.add('exited');
+  }
+
+  function fitAndResize() {
+    const s = activeId ? sessions.get(activeId) : null;
+    if (!s) return;
+    try { s.fit.fit(); } catch {}
+    requestTermResize(s.id, s.term.cols, s.term.rows);
+  }
+
+  function applyTheme() {
+    const t = termTheme();
+    for (const s of sessions.values()) s.term.options.theme = t;
+  }
+
+  function applyFontSize(px) {
+    const n = Number(px);
+    if (!Number.isFinite(n)) return;
+    for (const s of sessions.values()) {
+      s.term.options.fontSize = n;
+    }
+    fitAndResize();
+  }
+
+  // ---- Command history + learning ------------------------------------------
+  // The PTY is a raw byte stream, so we reconstruct the line the user is typing
+  // from keystrokes. This is best-effort: any cursor movement / shell
+  // completion / full-screen app marks the line "uncertain", which suppresses
+  // both the inline suggestion and recording until the next fresh prompt.
+
+  function wsKey() { return Sidebar.workspaceRoot() || 'default'; }
+
+  // Terminal history is a per-workspace "frequent commands" table
+  // {cmd,count,lastUsed}, learned as you type and deletable from the 🕘 panel.
+  // All workspaces share one native record (term/commands.json), a
+  // { "<workspace>": commands[] } map; `termCommands` is the current slice.
+  async function ensureTermHistory() {
+    const k = wsKey();
+    if (k === termHistoryKey) return;
+    termHistoryKey = k;
+    termCommands = [];
+    let rec = null;
+    try { rec = await requestHistoryRead('term', 'commands'); } catch {}
+    if (k !== termHistoryKey) return;          // workspace switched mid-load
+    termAll = (rec && typeof rec.commands === 'object' && rec.commands) ? rec.commands : {};
+    termCommands = Array.isArray(termAll[k]) ? termAll[k] : [];
+    termAll[k] = termCommands;
+  }
+
+  function persistTermHistory() {
+    if (!termHistoryKey) termHistoryKey = wsKey();
+    termAll[termHistoryKey] = termCommands;
+    try { requestHistoryWrite('term', 'commands', { id: 'commands', commands: termAll }); } catch {}
+  }
+
+  // Learn one completed command: bump its count + recency (smart learning — a
+  // command typed repeatedly climbs the 常用 list), then persist.
+  function recordCommand(cmd) {
+    const c = String(cmd || '').trim();
+    if (!c || c.length > 200) return;          // skip empty / pasted blobs
+    const now = Date.now();
+    const e = termCommands.find((x) => x.cmd === c);
+    if (e) { e.count = (e.count || 0) + 1; e.lastUsed = now; }
+    else termCommands.push({ cmd: c, count: 1, lastUsed: now });
+    persistTermHistory();
+  }
+
+  // Best match for the inline ghost: most-used wins, recency breaks ties. With
+  // an empty prefix (fresh prompt) this returns the single most-used command,
+  // so the terminal shows a Warp-style suggestion before you type anything.
+  function bestSuggestion(prefix) {
+    let best = null;
+    for (const e of termCommands) {
+      if (!e.cmd) continue;
+      if (prefix && (e.cmd.length <= prefix.length || !e.cmd.startsWith(prefix))) continue;
+      if (!best
+        || (e.count || 0) > (best.count || 0)
+        || ((e.count || 0) === (best.count || 0) && (e.lastUsed || 0) > (best.lastUsed || 0))) {
+        best = e;
+      }
+    }
+    return best ? best.cmd : '';
+  }
+
+  // Update the reconstructed line from one chunk of typed data.
+  function trackInput(tr, d) {
+    if (tr.alt) return;
+    if (d === '\r' || d === '\n') {
+      if (!tr.disabled) recordCommand(tr.line);
+      tr.line = ''; tr.disabled = false;
+      return;
+    }
+    if (d === '\x03' || d === '\x04') { tr.line = ''; tr.disabled = false; return; } // Ctrl-C / Ctrl-D
+    if (d === '\x7f' || d === '\b') { tr.line = tr.line.slice(0, -1); return; }       // backspace
+    if (d === '\x15') { tr.line = ''; return; }                                       // Ctrl-U kill line
+    if (d === '\t') { tr.disabled = true; return; }                                   // shell completion → unknown
+    if (d.charCodeAt(0) === 0x1b) { tr.disabled = true; return; }                     // arrows / esc seq → unknown
+    // Plain text (single char or pasted run). Reject if it carries any control.
+    if (/[\x00-\x1f\x7f]/.test(d)) { tr.disabled = true; return; }
+    tr.line += d;
+  }
+
+  // Intercept keystrokes: accept the ghost on Right-arrow at line end, else
+  // forward verbatim and update tracking. Input is ALWAYS forwarded unchanged
+  // except the accept case, so a tracking bug can never break normal typing.
+  function handleTermInput(id, d) {
+    const s = sessions.get(id);
+    if (!s) { requestTermInput(id, d); return; }
+    const tr = s.track;
+    // Accept the ghost on Right-arrow OR Tab — but only when a suggestion is
+    // actually showing. With no ghost, Tab falls through to the shell's own
+    // completion (and Right-arrow just moves the cursor), so nothing is lost.
+    const canAccept = tr.suggest && !tr.alt && !tr.disabled
+      && tr.suggest.length > tr.line.length && tr.suggest.startsWith(tr.line);
+    if ((d === '\x1b[C' || d === '\t') && canAccept) {
+      const suffix = tr.suggest.slice(tr.line.length);
+      requestTermInput(id, suffix);   // let the shell echo it
+      tr.line = tr.suggest;
+      hideGhost(s);
+      return;                          // swallow the bare Right-arrow / Tab
+    }
+    requestTermInput(id, d);
+    trackInput(tr, d);
+  }
+
+  // DEC private modes that signal an interactive app has taken over the screen
+  // and is doing its own input/rendering (and often its own autosuggest): the
+  // alt screen (vim, less), and mouse tracking (Claude Code, Codex, htop, …)
+  // which inline TUIs enable without switching to the alt screen.
+  const APP_MODES = new Set([
+    '1049', '47', '1047',                          // alt screen
+    '1000', '1001', '1002', '1003', '1005', '1006', '1015', '1016', // mouse
+  ]);
+
+  // Scan PTY output for app enter/leave and toggle the suggestion suppression.
+  // While any such mode (or the kitty keyboard protocol) is active we stop
+  // tracking and hide the ghost, so it never fights the app's own UI / its own
+  // Right-arrow / Tab completion (e.g. Claude Code, Codex).
+  function afterOutput(id, data) {
+    const s = sessions.get(id);
+    if (!s) return;
+    const tr = s.track;
+    if (!tr.modes) tr.modes = new Set();
+    let changed = false;
+    const re = /\x1b\[\?([0-9;]+)([hl])/g;
+    let m;
+    while ((m = re.exec(data))) {
+      const on = m[2] === 'h';
+      for (const num of m[1].split(';')) {
+        if (!APP_MODES.has(num)) continue;
+        if (on) tr.modes.add(num); else tr.modes.delete(num);
+        changed = true;
+      }
+    }
+    // Kitty keyboard protocol: push (CSI > flags u) / pop (CSI < … u). Both
+    // Claude Code and Codex use it to read modified keys like Shift+Enter.
+    if (/\x1b\[>[0-9;]*u/.test(data)) { tr.modes.add('kitty'); changed = true; }
+    if (/\x1b\[<[0-9;]*u/.test(data)) { tr.modes.delete('kitty'); changed = true; }
+    if (!changed) return;
+    const app = tr.modes.size > 0;
+    if (app && !tr.alt) { tr.alt = true; tr.line = ''; hideGhost(s); }
+    else if (!app && tr.alt) { tr.alt = false; tr.line = ''; tr.disabled = false; }
+  }
+
+  function hideGhost(s) {
+    s.track.suggest = '';
+    if (s.ghostEl) s.ghostEl.style.display = 'none';
+  }
+
+  function cellDims(s) {
+    try {
+      const c = s.term._core._renderService.dimensions.css.cell;
+      if (c && c.width && c.height) return { w: c.width, h: c.height };
+    } catch {}
+    return null;
+  }
+
+  // Position the dim suggestion span at the cursor cell. Purely additive — if
+  // anything is unavailable we just hide it; typing is unaffected.
+  function refreshGhost(id) {
+    const s = sessions.get(id);
+    if (!s || !s.ghostEl) return;
+    const tr = s.track;
+    // Show even on an empty line (Warp-style: the top command appears at a
+    // fresh prompt). Only alt-screen / uncertain input suppresses it.
+    if (tr.alt || tr.disabled) { hideGhost(s); return; }
+    const sug = bestSuggestion(tr.line);
+    if (!sug) { hideGhost(s); return; }
+    const dims = cellDims(s);
+    const screen = s.host.querySelector('.xterm-screen');
+    if (!dims || !screen) { hideGhost(s); return; }
+    let col, row;
+    try {
+      const buf = s.term.buffer.active;
+      col = buf.cursorX; row = buf.cursorY;
+    } catch { hideGhost(s); return; }
+    const hostRect = s.host.getBoundingClientRect();
+    const scrRect = screen.getBoundingClientRect();
+    const left = (scrRect.left - hostRect.left) + col * dims.w;
+    const top = (scrRect.top - hostRect.top) + row * dims.h;
+    tr.suggest = sug;
+    s.ghostEl.textContent = sug.slice(tr.line.length);
+    s.ghostEl.style.left = `${left}px`;
+    s.ghostEl.style.top = `${top}px`;
+    s.ghostEl.style.height = `${dims.h}px`;
+    s.ghostEl.style.fontSize = `${s.term.options.fontSize || 13}px`;
+    s.ghostEl.style.display = '';
+  }
+
+  // ---- Left tab-rail resize -------------------------------------------------
+  // Drag the divider between the tab rail and the terminal area to set the
+  // rail's width; persisted globally (like the AI panel width / term height).
+  // The 常用/最近 command-history list now lives in the Settings window —
+  // here we only keep the inline ghost suggestion (driven by `termCommands`).
+
+  function initSideResize(panel) {
+    const handle = panel.querySelector('.term-side-resize');
+    const side = panel.querySelector('.term-side');
+    if (!handle || !side) return;
+    let dragging = false;
+    handle.addEventListener('mousedown', (e) => {
+      dragging = true;
+      e.preventDefault();
+      document.body.style.userSelect = 'none';
+      document.body.style.cursor = 'ew-resize';
+    });
+    window.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const rect = panel.getBoundingClientRect();
+      const w = Math.max(110, Math.min(360, e.clientX - rect.left));
+      side.style.flexBasis = `${w}px`;
+    });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      localStorage.setItem('mdgem.term.sideWidth', String(side.offsetWidth));
+      fitAndResize();
+    });
+  }
+
+  return {
+    ensure, fitAndResize, applyTheme, applyFontSize, markExit, create, afterOutput,
+  };
+})();
+
+PanelHooks.terminal = () => TerminalPanel.ensure();
+PanelHooks.terminalResized = () => TerminalPanel.fitAndResize();
+
+// ===================================================================
+// Document view — owns the main content area's edit/preview state. Code &
+// text files open in a CodeMirror editor by default; markdown renders to a
+// preview by default. Either toggles via the floating mode bar. Edits save to
+// disk (⌘S / Save) through the existing writeFile IPC; the host's FS watcher
+// then re-renders any open markdown preview. The editor bundle is loaded on
+// demand the first time edit mode is entered (mirrors the terminal bundle).
+// ===================================================================
+
+let editorBundleLoaded = false;
+async function ensureEditorBundle() {
+  if (editorBundleLoaded) return;
+  const script = document.createElement('script');
+  script.src = 'vendor/editor.bundle.js';
+  await new Promise((res, rej) => {
+    script.onload = res;
+    script.onerror = rej;
+    document.head.appendChild(script);
+  });
+  editorBundleLoaded = true;
+}
+
+const DocView = (() => {
+  // The document shown in the main area.
+  let cur = { path: null, ext: '', kind: null, editable: false, mode: 'preview', dirty: false };
+  let handle = null;   // CodeMirror handle from window.MDEditor.createEditor
+  let autoSaveTimer = null;
+
+  function el(id) { return document.getElementById(id); }
+  function baseName(p) { return String(p || '').split(/[\\/]/).pop() || String(p || ''); }
+
+  function path() { return cur.path; }
+  function isDirty() { return !!cur.dirty; }
+  function isEditing() { return cur.mode === 'edit'; }
+
+  function markDirty(d) {
+    cur.dirty = !!d;
+    const dot = el('doc-dirty');
+    const save = el('doc-save-btn');
+    if (dot) dot.hidden = !cur.dirty;
+    if (save) save.hidden = !cur.dirty;
+    try { Tabs.refresh(); } catch {}
+  }
+  function markClean() { markDirty(false); }
+
+  function renderBar() {
+    const b = el('doc-modebar');
+    if (!b) return;
+    if (!cur.path) { b.hidden = true; return; }
+    b.hidden = false;
+    const nameEl = b.querySelector('.doc-modebar-name');
+    if (nameEl) nameEl.textContent = baseName(cur.path);
+    const toggle = el('doc-mode-toggle');
+    if (toggle) {
+      toggle.hidden = !cur.editable;
+      if (cur.editable) {
+        toggle.textContent = cur.mode === 'edit' ? '预览' : '编辑';
+        toggle.title = cur.mode === 'edit' ? '切换到预览' : '切换到编辑';
+      }
+    }
+    markDirty(cur.dirty);
+  }
+
+  function showMain() {
+    const m = el('main'); const h = el('editor-host');
+    if (m) m.hidden = false;
+    if (h) h.hidden = true;
+  }
+  function showEditor() {
+    const m = el('main'); const h = el('editor-host');
+    if (m) m.hidden = true;
+    if (h) h.hidden = false;
+    try { FindBar.close(); } catch {}   // preview find bar doesn't apply in edit mode
+  }
+  function destroyEditor() {
+    if (autoSaveTimer) { clearTimeout(autoSaveTimer); autoSaveTimer = null; }
+    if (handle) { try { handle.destroy(); } catch {} handle = null; }
+    const h = el('editor-host');
+    if (h) h.innerHTML = '';
+  }
+
+  // Debounced auto-save after edits (only in the 'afterEdit' mode).
+  function maybeAutoSaveAfterEdit() {
+    if (uiSettings.autoSave !== 'afterEdit') return;
+    if (autoSaveTimer) clearTimeout(autoSaveTimer);
+    autoSaveTimer = setTimeout(() => {
+      autoSaveTimer = null;
+      if (cur.dirty) save();
+    }, 1000);
+  }
+
+  function maybeAutoSaveOnBlur() {
+    if (uiSettings.autoSave === 'onBlur' && cur.dirty) save();
+  }
+
+  // Reset to a non-editable readonly preview (image / video / html / unsupported).
+  function toReadonly() {
+    destroyEditor();
+    showMain();
+    cur = { path: null, ext: '', kind: null, editable: false, mode: 'preview', dirty: false };
+    const b = el('doc-modebar');
+    if (b) b.hidden = true;
+  }
+
+  // Host rendered a markdown document into #root.
+  function onMarkdownRendered() {
+    const p = Sidebar.currentFilePath();
+    if (!p) { const b = el('doc-modebar'); if (b) b.hidden = true; return; }
+    // If actively editing this same file, keep the editor up (the re-render
+    // just refreshed the hidden #root underneath).
+    if (cur.mode === 'edit' && cur.path === p) return;
+    destroyEditor();
+    showMain();
+    cur = { path: p, ext: fileExt(p), kind: 'md', editable: true, mode: 'preview', dirty: false };
+    renderBar();
+    try { Tabs.note(p, 'md'); } catch {}
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  // Open an .html file — shows the live iframe preview, editable via the toggle.
+  function openHtml(node) {
+    const p = node.path;
+    destroyEditor();
+    showMain();
+    cur = { path: p, ext: fileExt(p), kind: 'html', editable: true, mode: 'preview', dirty: false };
+    showPreview(node, htmlFrameHTML(p));
+    renderBar();
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  // Open a code/text file — defaults to edit mode.
+  async function openText(node) {
+    const p = node.path;
+    setLoading(true);
+    const res = await requestReadFile(p);
+    setLoading(false);
+    if (!res || !res.ok) {
+      toReadonly();
+      Sidebar.setActivePreview(p);
+      showPreview(node, previewUnsupportedHTML(node, res && res.error));
+      return;
+    }
+    cur = { path: p, ext: fileExt(p), kind: 'text', editable: true, mode: 'edit', dirty: false };
+    Sidebar.setActivePreview(p);
+    Sidebar.setOutline([]);
+    await mountEditor(res.text);
+    renderBar();
+    try { Tabs.note(p, 'text'); } catch {}
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  async function mountEditor(text) {
+    try {
+      await ensureEditorBundle();
+    } catch {
+      toReadonly();
+      showToast('无法加载编辑器组件', 'error');
+      return;
+    }
+    if (!window.MDEditor) { toReadonly(); showToast('无法加载编辑器组件', 'error'); return; }
+    destroyEditor();
+    const host = el('editor-host');
+    handle = window.MDEditor.createEditor({
+      parent: host,
+      doc: text || '',
+      ext: cur.ext,
+      base: resolvedTheme().base,
+      onChange: () => { markDirty(true); maybeAutoSaveAfterEdit(); },
+      onSave: () => { save(); },
+      onBlur: () => { maybeAutoSaveOnBlur(); },
+    });
+    showEditor();
+    requestAnimationFrame(() => { try { handle.focus(); } catch {} });
+  }
+
+  async function save() {
+    if (!handle || !cur.path) return;
+    const content = handle.getDoc();
+    const w = await requestWriteFile(cur.path, content);
+    if (w && w.ok) {
+      markClean();
+      showToast('已保存', 'info');
+    } else {
+      showToast(`保存失败：${(w && w.error) || ''}`, 'error');
+    }
+  }
+
+  async function toggle() {
+    if (!cur.editable) return;
+    if (cur.mode === 'edit') {
+      // → preview. Auto-save pending edits first so the preview matches disk.
+      if (cur.dirty) { await save(); if (cur.dirty) return; }
+      const content = handle ? handle.getDoc() : '';
+      cur.mode = 'preview';
+      destroyEditor();
+      showMain();
+      if (cur.kind === 'md') {
+        requestOpenFile(cur.path);   // host reloads + re-renders
+      } else if (cur.kind === 'html') {
+        showPreview({ path: cur.path, name: baseName(cur.path) }, htmlFrameHTML(cur.path));
+      } else {
+        renderTextPreview({ path: cur.path, name: baseName(cur.path) }, content);
+      }
+      renderBar();
+    } else {
+      // → edit. Read the raw bytes from disk fresh.
+      setLoading(true);
+      const res = await requestReadFile(cur.path);
+      setLoading(false);
+      if (!res || !res.ok) { showToast(`无法读取：${(res && res.error) || ''}`, 'error'); return; }
+      cur.mode = 'edit';
+      await mountEditor(res.text);
+      renderBar();
+    }
+  }
+
+  function applyTheme() {
+    if (handle) { try { handle.setBase(resolvedTheme().base); } catch {} }
+  }
+
+  function confirmLeave() {
+    return showModal({
+      title: '未保存的更改',
+      message: `“${baseName(cur.path)}” 有未保存的更改，切换将放弃这些更改。`,
+      confirmLabel: '放弃并切换',
+      danger: true,
+    });
+  }
+
+  // Called before navigating away from a dirty editor. Auto-save modes flush
+  // to disk and proceed; manual mode asks to discard. Returns true to proceed.
+  async function prepareLeave() {
+    if (!cur.dirty) return true;
+    if (uiSettings.autoSave !== 'off') {
+      await save();
+      return !cur.dirty;   // proceed only if the save succeeded
+    }
+    const ok = await confirmLeave();
+    if (ok) markClean();
+    return ok;
+  }
+
+  return {
+    onMarkdownRendered, openText, openHtml, toReadonly, toggle, save, applyTheme,
+    isDirty, isEditing, path, markClean, prepareLeave,
+  };
+})();
+
+document.getElementById('doc-mode-toggle')?.addEventListener('click', () => DocView.toggle());
+document.getElementById('doc-save-btn')?.addEventListener('click', () => DocView.save());
+
+// ===================================================================
+// Editor tabs — IDE-style header strip. Every opened file becomes a tab;
+// re-opening a file just re-activates its tab. Switching a tab re-runs the
+// normal open flow (`previewFile`) for that path, so there's only ever one
+// live editor / rendered doc at a time — tabs hold lightweight bookkeeping
+// (path, name, kind, remembered scroll), not heavyweight DOM/editor state.
+// ===================================================================
+const Tabs = (() => {
+  const MAX = 12;                 // soft cap; oldest idle tab is evicted past this
+  let list = [];                  // [{ path, name, kind, ext, scrollTop }]
+  let active = null;              // path of the visible tab
+
+  function el(id) { return document.getElementById(id); }
+  function baseName(p) { return String(p || '').split(/[\\/]/).pop() || String(p || ''); }
+  function bar() { return el('tabbar'); }
+  function find(p) { return list.find((t) => t.path === p); }
+  function mainScrollable() { const h = el('editor-host'); return !h || h.hidden; }
+
+  // Stash the live scroll position onto the active tab before we leave it.
+  function captureScroll() {
+    if (!mainScrollable()) return;          // editor visible → #main scroll is 0
+    const t = find(active);
+    const m = el('main');
+    if (t && m) t.scrollTop = m.scrollTop;
+  }
+
+  // A file just became visible (from any entry point). Ensure it has a tab and
+  // make it active. Idempotent — re-rendering the same file just re-selects it.
+  function note(path, kind) {
+    if (!path) return;
+    let t = find(path);
+    if (!t) {
+      t = { path, name: baseName(path), kind, ext: fileExt(path), scrollTop: 0 };
+      list.push(t);
+      evict();
+    } else if (kind) {
+      t.kind = kind;
+    }
+    active = path;
+    render();
+    // Restore this tab's remembered scroll (render() / showPreview reset to 0).
+    if (mainScrollable() && t.scrollTop) {
+      const top = t.scrollTop, m = el('main');
+      if (m) requestAnimationFrame(() => { m.scrollTop = top; });
+    }
+  }
+
+  // Drop the oldest non-active tab while over the cap. Inactive tabs are never
+  // dirty (leaving an editor always saves/discards first), so this is safe.
+  function evict() {
+    while (list.length > MAX) {
+      const idx = list.findIndex((t) => t.path !== active);
+      if (idx < 0) break;
+      list.splice(idx, 1);
+    }
+  }
+
+  function activate(path) {
+    if (path === active) {
+      if (mainScrollable()) { const m = el('main'); if (m) m.scrollTo({ top: 0, behavior: 'smooth' }); }
+      return;
+    }
+    const t = find(path);
+    if (!t) return;
+    captureScroll();
+    previewFile({ path: t.path, name: t.name, type: 'file' });
+  }
+
+  async function closeTab(path) {
+    const t = find(path);
+    if (!t) return;
+    const wasActive = path === active;
+    // The active tab is the only one that can hold a dirty editor.
+    if (wasActive && DocView.isDirty()) {
+      const ok = await DocView.prepareLeave();
+      if (!ok) return;
+    }
+    const idx = list.indexOf(t);
+    list.splice(idx, 1);
+    if (!wasActive) { render(); return; }
+    const next = list[idx] || list[idx - 1] || null;
+    active = null;
+    render();                         // redraw the reduced strip immediately
+    if (next) activate(next.path);
+    else showEmpty();
+  }
+
+  // No tabs left — clear the view back to the empty home state.
+  function showEmpty() {
+    try { DocView.toReadonly(); } catch {}
+    const root = el('root'); if (root) root.innerHTML = '';
+    try { Sidebar.setOutline([]); } catch {}
+    try { Sidebar.setActivePreview(null); } catch {}
+    updateEmptyState();
+  }
+
+  function underRoot(p, root) {
+    if (p === root) return true;
+    return p.startsWith(root + '/') || p.startsWith(root + '\\');
+  }
+
+  // Workspace changed — drop tabs that don't belong to the new root.
+  function pruneToRoot(root) {
+    if (!root) { list = []; active = null; render(); return; }
+    list = list.filter((t) => underRoot(t.path, root));
+    if (!find(active)) active = null;
+    render();
+  }
+
+  // Drop every tab in `removeSet`. Flushes the active editor first if it's
+  // among them and dirty. `fallback` is the path to activate if the active tab
+  // got closed (must be a survivor); otherwise we fall back to the last tab.
+  async function removeMany(removeSet, fallback) {
+    if (removeSet.has(active) && DocView.isDirty()) {
+      const ok = await DocView.prepareLeave();
+      if (!ok) return;
+    }
+    const activeRemoved = removeSet.has(active);
+    list = list.filter((t) => !removeSet.has(t.path));
+    if (!activeRemoved) { render(); return; }
+    active = null;
+    render();                         // redraw the reduced strip immediately
+    if (list.length) activate(fallback && find(fallback) ? fallback : list[list.length - 1].path);
+    else showEmpty();
+  }
+
+  function closeOthers(keep) {
+    removeMany(new Set(list.filter((t) => t.path !== keep).map((t) => t.path)), keep);
+  }
+  function closeSide(path, side) {
+    const i = list.findIndex((t) => t.path === path);
+    if (i < 0) return;
+    const victims = side === 'left' ? list.slice(0, i) : list.slice(i + 1);
+    removeMany(new Set(victims.map((t) => t.path)), path);
+  }
+  function closeAll() { removeMany(new Set(list.map((t) => t.path)), null); }
+
+  // Right-click a tab → close-family menu (no copy/path items by design).
+  function tabMenu(e, t) {
+    e.preventDefault();
+    e.stopPropagation();
+    const i = list.indexOf(t);
+    const items = [{ label: '关闭', action: () => closeTab(t.path) }];
+    if (list.length > 1) items.push({ label: '关闭其他', action: () => closeOthers(t.path) });
+    if (i > 0) items.push({ label: '关闭左侧标签', action: () => closeSide(t.path, 'left') });
+    if (i < list.length - 1) items.push({ label: '关闭右侧标签', action: () => closeSide(t.path, 'right') });
+    items.push('separator');
+    items.push({ label: '全部关闭', danger: true, action: () => closeAll() });
+    showContextMenu(e.clientX, e.clientY, items);
+  }
+
+  function render() {
+    const b = bar();
+    if (!b) return;
+    if (!list.length) { b.hidden = true; b.innerHTML = ''; return; }
+    b.hidden = false;
+    b.innerHTML = '';
+    const sc = document.createElement('div');
+    sc.className = 'tab-scroll';
+    const dirtyActive = DocView.isDirty();
+    for (const t of list) {
+      const isActive = t.path === active;
+      const tab = document.createElement('div');
+      tab.className = 'tab' + (isActive ? ' is-active' : '');
+      tab.title = t.path;
+      const icon = document.createElement('span');
+      icon.className = 'tab-icon';
+      icon.innerHTML = iconForFile(t.ext);
+      const label = document.createElement('span');
+      label.className = 'tab-label';
+      label.textContent = t.name;
+      const dirty = isActive && dirtyActive;
+      const close = document.createElement('span');
+      close.className = 'tab-close' + (dirty ? ' is-dirty' : '');
+      close.textContent = dirty ? '●' : '×';
+      close.title = '关闭';
+      if (dirty) {
+        close.addEventListener('mouseenter', () => { close.textContent = '×'; });
+        close.addEventListener('mouseleave', () => { close.textContent = '●'; });
+      }
+      close.addEventListener('click', (e) => { e.stopPropagation(); closeTab(t.path); });
+      tab.appendChild(icon);
+      tab.appendChild(label);
+      tab.appendChild(close);
+      tab.addEventListener('click', () => activate(t.path));
+      tab.addEventListener('auxclick', (e) => { if (e.button === 1) { e.preventDefault(); closeTab(t.path); } });
+      tab.addEventListener('contextmenu', (e) => tabMenu(e, t));
+      sc.appendChild(tab);
+    }
+    b.appendChild(sc);
+
+    const act = sc.querySelector('.tab.is-active');
+    if (act) act.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  return { note, activate, closeTab, captureScroll, pruneToRoot, refresh: render };
+})();
+
+// ===================================================================
+// Find-in-page for the markdown / preview pane (the code editor has its own
+// CodeMirror search). ⌘/Ctrl+F opens an IDE-style bar at the top-right of the
+// content; matches are wrapped in <mark> (compatible with macOS 13 WebKit,
+// which lacks the CSS Custom Highlight API) and navigated with ↵ / ⇧↵.
+// ===================================================================
+const FindBar = (() => {
+  let bar = null, input = null, countEl = null;
+  let marks = [];      // every <mark.find-hit> currently in the document
+  let idx = -1;        // index of the active match
+
+  function root() { return document.getElementById('root'); }
+  function host() { return document.getElementById('main-col'); }
+
+  function ensure() {
+    if (bar) return bar;
+    bar = document.createElement('div');
+    bar.className = 'find-bar';
+    bar.hidden = true;
+    bar.innerHTML =
+      '<input type="text" class="find-input" placeholder="查找" aria-label="查找">' +
+      '<span class="find-count">0/0</span>' +
+      '<button type="button" class="find-btn find-prev" title="上一个 (⇧↵)">↑</button>' +
+      '<button type="button" class="find-btn find-next" title="下一个 (↵)">↓</button>' +
+      '<button type="button" class="find-btn find-close" title="关闭 (Esc)">✕</button>';
+    host().appendChild(bar);
+    input = bar.querySelector('.find-input');
+    countEl = bar.querySelector('.find-count');
+    input.addEventListener('input', () => run(input.value));
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); e.shiftKey ? prev() : next(); }
+      else if (e.key === 'Escape') { e.preventDefault(); close(); }
+    });
+    bar.querySelector('.find-prev').addEventListener('click', () => { prev(); input.focus(); });
+    bar.querySelector('.find-next').addEventListener('click', () => { next(); input.focus(); });
+    bar.querySelector('.find-close').addEventListener('click', close);
+    return bar;
+  }
+
+  function open() {
+    ensure();
+    bar.hidden = false;
+    host()?.classList.add('is-finding');
+    const sel = String(window.getSelection ? window.getSelection() : '').trim();
+    if (sel && sel.length <= 80 && !sel.includes('\n')) input.value = sel;
+    input.focus();
+    input.select();
+    if (input.value) run(input.value);
+  }
+
+  function close() {
+    if (!bar) return;
+    clear();
+    bar.hidden = true;
+    host()?.classList.remove('is-finding');
+  }
+
+  function isOpen() { return !!bar && !bar.hidden; }
+
+  // Unwrap every highlight and stitch the split text back together.
+  function clear() {
+    const r = root();
+    if (r) {
+      r.querySelectorAll('mark.find-hit').forEach((m) => {
+        m.replaceWith(document.createTextNode(m.textContent));
+      });
+      r.normalize();
+    }
+    marks = [];
+    idx = -1;
+  }
+
+  function run(query) {
+    clear();
+    const q = query || '';
+    const r = root();
+    if (!q || !r) { updateCount(); return; }
+    const lq = q.toLowerCase();
+    const walker = document.createTreeWalker(r, NodeFilter.SHOW_TEXT, {
+      acceptNode: (n) => {
+        if (!n.nodeValue || !n.nodeValue.toLowerCase().includes(lq)) return NodeFilter.FILTER_REJECT;
+        // Skip rendered math (wrapping KaTeX text breaks its layout).
+        if (n.parentElement && n.parentElement.closest('.katex, svg')) return NodeFilter.FILTER_REJECT;
+        return NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    const nodes = [];
+    let n; while ((n = walker.nextNode())) nodes.push(n);
+    for (const node of nodes) {
+      const text = node.nodeValue;
+      const lower = text.toLowerCase();
+      const frag = document.createDocumentFragment();
+      let from = 0, i = lower.indexOf(lq);
+      while (i >= 0) {
+        if (i > from) frag.appendChild(document.createTextNode(text.slice(from, i)));
+        const m = document.createElement('mark');
+        m.className = 'find-hit';
+        m.textContent = text.slice(i, i + q.length);
+        frag.appendChild(m);
+        marks.push(m);
+        from = i + q.length;
+        i = lower.indexOf(lq, from);
+      }
+      if (from < text.length) frag.appendChild(document.createTextNode(text.slice(from)));
+      node.parentNode.replaceChild(frag, node);
+    }
+    if (marks.length) { idx = 0; activate(); }
+    else updateCount();
+  }
+
+  function updateCount() {
+    if (countEl) countEl.textContent = `${marks.length ? idx + 1 : 0}/${marks.length}`;
+  }
+
+  function activate() {
+    marks.forEach((m, k) => m.classList.toggle('current', k === idx));
+    const m = marks[idx];
+    if (m) m.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    updateCount();
+  }
+
+  function next() { if (marks.length) { idx = (idx + 1) % marks.length; activate(); } }
+  function prev() { if (marks.length) { idx = (idx - 1 + marks.length) % marks.length; activate(); } }
+
+  return { open, close, isOpen };
+})();
+
+// ===================================================================
+// Per-workspace memory — remembers the last opened file, sidebar/panel state,
+// terminal open-state, and expanded folders, keyed by the workspace root path.
+// Lives in the global native store (UserDefaults / tauri-store), so nothing is
+// written into the user's project. Loaded once on workspace entry (after the
+// host pushes the file tree) and re-saved, debounced, on any layout change.
+// ===================================================================
+
+const Memory = (() => {
+  let rootKey = null;
+  let loaded = false;
+  let restoring = false;   // suppress saves while applying a restore cascade
+  let timer = null;
+
+  function onWorkspace(root) {
+    rootKey = root || null;
+    loaded = false;
+    if (!rootKey) return;
+    requestMemoryGet(rootKey).then((blob) => {
+      loaded = true;
+      if (blob && typeof blob === 'object') {
+        restoring = true;
+        try { restore(blob); } finally {
+          // Let the restore's own state-change callbacks settle first.
+          setTimeout(() => { restoring = false; }, 0);
+        }
+      }
+    });
+  }
+
+  function restore(blob) {
+    try { Sidebar.restoreLayout(blob); } catch {}
+    try { Panels.restoreLayout(blob); } catch {}
+    // Restore the last opened file, overriding the host's default auto-open.
+    const last = blob.lastFile;
+    if (last && last !== Sidebar.currentFilePath() && Sidebar.fileExists(last)) {
+      try { previewFile({ path: last, name: last.split(/[\\/]/).pop(), type: 'file' }); } catch {}
+    }
+  }
+
+  function collect() {
+    const blob = {};
+    try { Object.assign(blob, Sidebar.collectLayout()); } catch {}
+    try { blob.panels = Panels.collectLayout(); } catch {}
+    blob.lastFile = Sidebar.activePreview() || Sidebar.currentFilePath() || null;
+    return blob;
+  }
+
+  function scheduleSave() {
+    if (!rootKey || !loaded || restoring) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => {
+      timer = null;
+      try { requestMemorySet(rootKey, collect()); } catch {}
+    }, 400);
+  }
+
+  return { onWorkspace, scheduleSave };
+})();
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', () => Sidebar.init());
+  document.addEventListener('DOMContentLoaded', () => { Sidebar.init(); Panels.init(); Settings.init(); Home.init(); });
 } else {
   Sidebar.init();
+  Panels.init();
+  Settings.init();
+  Home.init();
 }
 
 // Suppress the host webview's default context menu (Reload / Inspect / etc.)
@@ -756,8 +4073,35 @@ document.addEventListener('keydown', (e) => {
   if (meta && (e.key === 'a' || e.key === 'A')) {
     const tag = document.activeElement && document.activeElement.tagName;
     if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+    // Don't hijack select-all inside the code editor (CodeMirror handles it).
+    if (document.activeElement?.closest?.('#editor-host')) return;
     e.preventDefault();
     selectAllContent();
+  }
+  // Save the open editor. When the editor is focused CodeMirror's own Mod-s
+  // keymap handles it; this covers ⌘S while focus is elsewhere.
+  if (meta && (e.key === 's' || e.key === 'S') && DocView.isEditing()) {
+    if (document.activeElement?.closest?.('#editor-host')) return;
+    e.preventDefault();
+    DocView.save();
+  }
+  // ⌘/Ctrl+F → find in the markdown/preview pane (the code editor owns its own
+  // CodeMirror search in edit mode).
+  if (meta && !e.shiftKey && !e.altKey && (e.key === 'f' || e.key === 'F')) {
+    if (DocView.isEditing()) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && !ae.closest('.find-bar')) return;
+    e.preventDefault();
+    FindBar.open();
+  }
+  // ⌘/Ctrl+I → toggle AI panel; ⌘/Ctrl+J → toggle terminal.
+  if (meta && !e.shiftKey && !e.altKey && (e.key === 'i' || e.key === 'I')) {
+    e.preventDefault();
+    Panels.toggleAi();
+  }
+  if (meta && !e.shiftKey && !e.altKey && (e.key === 'j' || e.key === 'J')) {
+    e.preventDefault();
+    Panels.toggleTerminal();
   }
 });
 
@@ -769,8 +4113,8 @@ function isWindowsHost() {
   // Tauri only loads on Windows for this project; WebKit host is Mac.
   return !!window.__TAURI__;
 }
-function revealLabel() { return isWindowsHost() ? 'Reveal in Explorer' : 'Reveal in Finder'; }
-function trashLabel()  { return isWindowsHost() ? 'Move to Recycle Bin' : 'Move to Trash'; }
+function revealLabel() { return isWindowsHost() ? '在资源管理器中显示' : '在访达中显示'; }
+function trashLabel()  { return isWindowsHost() ? '移到回收站' : '移到废纸篓'; }
 
 function fsOp(payload) {
   try {
@@ -788,7 +4132,7 @@ function fsOp(payload) {
 async function copyPath(path) {
   try {
     await navigator.clipboard.writeText(path);
-    showToast('Path copied');
+    showToast('路径已复制');
   } catch {
     // Clipboard API can be blocked outside user-gesture or in some webviews;
     // ask native to copy via the platform clipboard instead.
@@ -800,15 +4144,15 @@ async function promptRename(node) {
   const dot = node.name.lastIndexOf('.');
   const stemEnd = dot > 0 ? dot : node.name.length;
   const v = await showModal({
-    title: 'Rename',
+    title: '重命名',
     input: { value: node.name, selectRange: [0, stemEnd] },
-    confirmLabel: 'Rename',
+    confirmLabel: '重命名',
   });
   if (typeof v !== 'string') return;
   const newName = v.trim();
   if (!newName || newName === node.name) return;
   if (/[\\/]/.test(newName)) {
-    showToast('Name cannot contain / or \\', 'error');
+    showToast('名称不能包含 / 或 \\', 'error');
     return;
   }
   fsOp({ op: 'rename', path: node.path, newName });
@@ -820,15 +4164,15 @@ async function promptCreate(parentDir, kind) {
     ? placeholder.lastIndexOf('.')
     : placeholder.length;
   const v = await showModal({
-    title: kind === 'file' ? 'New File' : 'New Folder',
+    title: kind === 'file' ? '新建文件' : '新建文件夹',
     input: { value: placeholder, selectRange: [0, stemEnd] },
-    confirmLabel: 'Create',
+    confirmLabel: '创建',
   });
   if (typeof v !== 'string') return;
   const name = v.trim();
   if (!name) return;
   if (/[\\/]/.test(name)) {
-    showToast('Name cannot contain / or \\', 'error');
+    showToast('名称不能包含 / 或 \\', 'error');
     return;
   }
   fsOp({
@@ -840,8 +4184,8 @@ async function promptCreate(parentDir, kind) {
 
 async function confirmDelete(node) {
   const ok = await showModal({
-    title: trashLabel() + '?',
-    message: `“${node.name}” will be moved to the system trash. You can restore it from there.`,
+    title: trashLabel() + '？',
+    message: `“${node.name}” 将被${trashLabel()}，你可以从那里恢复。`,
     confirmLabel: trashLabel(),
     danger: true,
   });
@@ -888,12 +4232,12 @@ function closeContextMenu() {
   document.querySelectorAll('.context-menu').forEach((m) => m.remove());
 }
 
-function showModal({ title, message, input, danger, confirmLabel }) {
+function showModal({ title, message, input, danger, confirmLabel, bodyNode, wide }) {
   return new Promise((resolve) => {
     const backdrop = document.createElement('div');
     backdrop.className = 'modal-backdrop';
     const box = document.createElement('div');
-    box.className = 'modal-box';
+    box.className = 'modal-box' + (wide ? ' modal-box-wide' : '');
 
     const titleEl = document.createElement('div');
     titleEl.className = 'modal-title';
@@ -906,6 +4250,8 @@ function showModal({ title, message, input, danger, confirmLabel }) {
       msgEl.textContent = message;
       box.appendChild(msgEl);
     }
+
+    if (bodyNode) box.appendChild(bodyNode);
 
     let inputEl = null;
     if (input) {
@@ -2090,9 +5436,29 @@ window.MDViewerAPI = {
   scrollToAnchor,
   setFileTree: (payload) => Sidebar.setFileTree(payload),
   onScanDirResult: (reqId, payload) => Sidebar.onScanDirResult(reqId, payload),
+  onReadFileResult: (reqId, payload) => onReadFileResult(reqId, payload),
+  onAiConfig: (reqId, config) => resolveAi(reqId, config),
+  onSettings: (reqId, settings) => resolveAi(reqId, settings),
+  onSettingsChanged: (settings) => applySettingsBlob(settings),
+  onMemory: (reqId, memory) => resolveAi(reqId, memory),
+  onHistoryLoaded: (reqId, history) => resolveAi(reqId, history),
+  onAiDelta: (reqId, payload) => onAiDelta(reqId, payload),
+  onAiDone: (reqId, payload) => resolveAi(reqId, payload),
+  onAiError: (reqId, payload) => resolveAi(reqId, payload),
+  onAiToolResult: (reqId, payload) => resolveAi(reqId, payload),
+  onWriteResult: (reqId, payload) => resolveAi(reqId, payload),
+  onAiConfigChanged: (config) => { try { AIPanel.onConfigChanged(config); } catch {} },
+  onTermData: (id, data) => onTermData(id, data),
+  onTermExit: (id, code) => onTermExit(id, code),
   toast: (message, type) => showToast(message, type),
   selectAllContent,
+  // ⌘S from the native File menu → save the open code/text editor (no-op when
+  // not editing). The native menu owns ⌘S because the read-only document's
+  // default Save would otherwise just swallow the shortcut.
+  saveActiveEditor: () => { try { if (DocView.isEditing()) DocView.save(); } catch {} },
   toggleSidebar: () => Sidebar.toggleCollapsed(),
+  toggleAiPanel: () => Panels.toggleAi(),
+  toggleTerminal: () => Panels.toggleTerminal(),
   setLoading,
-  setRecents: (list) => Sidebar.setRecents(list),
+  setRecents: (list) => { Sidebar.setRecents(list); Home.setRecents(list); },
 };

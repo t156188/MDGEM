@@ -10,6 +10,12 @@ struct MarkdownDocument: FileDocument {
         [.markdown, .plainText, .folder]
     }
 
+    // MDGEM is a viewer — it never writes the document back. Declaring no
+    // writable types tells AppKit this document can't be saved, so it won't try
+    // to autosave it on quit (which otherwise fails with "operation not
+    // supported" when the file changed on disk during the session).
+    static var writableContentTypes: [UTType] { [] }
+
     var text: String
     /// When opened from a folder, the relative path (within the folder) of
     /// the .md we auto-picked, so the host can mark it as the current file
@@ -42,9 +48,15 @@ struct MarkdownDocument: FileDocument {
         }
     }
 
-    // Reader-only: writing is not supported.
+    // Reader-only. With no writable content types this shouldn't be called,
+    // but if some macOS version still asks, hand back the on-disk file
+    // unchanged so a stray autosave is a harmless no-op instead of throwing
+    // (which would pop the "could not be autosaved" alert on quit).
     func fileWrapper(configuration: WriteConfiguration) throws -> FileWrapper {
-        throw CocoaError(.featureUnsupported)
+        if let existing = configuration.existingFile {
+            return existing
+        }
+        return FileWrapper(regularFileWithContents: Data(text.utf8))
     }
 
     // MARK: - Helpers

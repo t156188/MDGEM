@@ -90,7 +90,8 @@ enum FileTree {
                 "children": children
             ]
         } else {
-            guard extensions.contains(url.pathExtension.lowercased()) else { return nil }
+            // IDE-style tree: emit every regular file, not just markdown. The
+            // front-end decides how (or whether) to preview it by extension.
             return [
                 "type": "file",
                 "name": url.lastPathComponent,

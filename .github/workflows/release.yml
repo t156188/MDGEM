@@ -48,8 +48,8 @@ jobs:
         working-directory: mac
         run: |
           xcodebuild \
-            -project MDReader.xcodeproj \
-            -scheme MDReader \
+            -project MDGEM.xcodeproj \
+            -scheme MDGEM \
             -configuration Release \
             -derivedDataPath build \
             -arch ${{ matrix.arch }} \

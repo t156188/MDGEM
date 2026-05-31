@@ -1,0 +1,9 @@
+:root { --accent: #4493f8; }
+.card {
+  display: flex;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+}
+.card:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }

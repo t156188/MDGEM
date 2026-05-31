@@ -61,8 +61,18 @@ struct ContentView: View {
         .navigationTitle(
             session.fileURL?.lastPathComponent
                 ?? session.workspaceRoot?.lastPathComponent
-                ?? "MDReader"
+                ?? "MDGEM"
         )
+        .onAppear {
+            // A document window is up — dismiss the welcome window if it's open.
+            NotificationCenter.default.post(name: .mdgemDidOpenDocument, object: nil)
+        }
+        .background(WindowAccessor { window in
+            // Remember document-window position + size across launches. All
+            // document windows share one autosave name, so a newly opened doc
+            // appears at the last-used geometry (and cascades if one is open).
+            window.persistFrame(autosaveName: "MDGEMDocumentWindow")
+        })
     }
 
     private func handleFsOp(_ op: FsOpRequest, _ toast: @escaping (String, String) -> Void) {

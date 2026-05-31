@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en" data-theme="dark">
+<html lang="en" data-theme="dark" data-base="dark">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>MDReader</title>
+    <title>MDGEM</title>
     <link rel="stylesheet" href="vendor/katex.min.css" />
     <link id="hljs-theme" rel="stylesheet" href="vendor/hljs-light.css" />
     <link rel="stylesheet" href="viewer.css" />
@@ -18,22 +18,9 @@
       <div class="sb-pane" id="sb-pane-files"></div>
       <div class="sb-pane" id="sb-pane-outline" hidden></div>
       <footer class="sb-footer">
-        <div class="sb-theme-wrap">
-          <button id="sb-theme-btn" class="sb-theme-btn" type="button" aria-label="Appearance">
-            <span class="sb-theme-icon" aria-hidden="true">◧</span>
-          </button>
-          <div class="sb-theme-menu" id="sb-theme-menu" role="menu">
-            <div class="sb-theme-item" data-pref="system" role="menuitem">
-              <span class="sb-theme-mi" aria-hidden="true">◐</span><span>Auto</span>
-            </div>
-            <div class="sb-theme-item" data-pref="light" role="menuitem">
-              <span class="sb-theme-mi" aria-hidden="true">☼</span><span>Light</span>
-            </div>
-            <div class="sb-theme-item" data-pref="dark" role="menuitem">
-              <span class="sb-theme-mi" aria-hidden="true">☾</span><span>Dark</span>
-            </div>
-          </div>
-        </div>
+        <button id="sb-settings-btn" class="sb-tool-btn" type="button" title="设置" aria-label="设置">
+          <span aria-hidden="true">⚙</span>
+        </button>
         <div class="sb-fortune-wrap">
           <button id="sb-fortune-btn" class="sb-fortune-btn" type="button" title="遇事不决问春风~" aria-label="遇事不决问春风">
             <span aria-hidden="true">❀</span>
@@ -54,30 +41,68 @@
             </div>
           </div>
         </div>
+        <button id="sb-ai-btn" class="sb-tool-btn" type="button" title="AI assistant" aria-label="AI assistant">
+          <span aria-hidden="true">✦</span>
+        </button>
+        <button id="sb-term-btn" class="sb-tool-btn" type="button" title="Terminal" aria-label="Terminal">
+          <span aria-hidden="true">&gt;_</span>
+        </button>
         <span class="sb-version" id="sb-version" aria-label="App version"></span>
       </footer>
       <div class="sb-resize" id="sb-resize" aria-hidden="true"></div>
     </aside>
     <button id="sb-expand" class="sb-expand" hidden title="Show sidebar" aria-label="Show sidebar">›</button>
-    <main id="main">
-      <div id="root" class="markdown-body"></div>
-      <div id="empty-state" class="empty-state" hidden>
-        <div class="empty-glyph">.md</div>
-        <div class="empty-text">Open a Markdown file to begin</div>
+    <div id="workspace">
+      <div id="content-row">
+        <div id="main-col">
+          <div id="tabbar" class="tabbar" hidden></div>
+          <div id="doc-modebar" class="doc-modebar" hidden>
+            <span class="doc-modebar-name"></span>
+            <span class="doc-dirty" id="doc-dirty" hidden title="未保存（⌘S 保存）">●</span>
+            <button class="doc-save-btn" id="doc-save-btn" type="button" hidden title="保存 (⌘S)">保存</button>
+            <button class="doc-mode-toggle" id="doc-mode-toggle" type="button"></button>
+          </div>
+          <main id="main">
+            <div id="root" class="markdown-body"></div>
+            <div id="empty-state" class="empty-state" hidden>
+              <div class="home-card">
+                <div class="empty-glyph home-logo">.md</div>
+                <div class="home-title">MDGEM</div>
+                <div class="home-ver" id="home-version"></div>
+                <div class="home-actions">
+                  <button class="home-btn primary" id="home-open-folder" type="button">打开文件夹</button>
+                  <button class="home-btn" id="home-open-file" type="button">打开文件</button>
+                </div>
+                <div class="home-recents-wrap">
+                  <div class="home-recents-title" id="home-recents-title" hidden>最近打开</div>
+                  <div class="home-recents" id="home-recents"></div>
+                </div>
+                <div class="home-tip">把文件或文件夹拖到窗口即可打开</div>
+              </div>
+            </div>
+            <div id="loading-state" class="loading-state" hidden aria-hidden="true">
+              <div class="loading-dots"><span></span><span></span><span></span></div>
+            </div>
+          </main>
+          <div id="editor-host" class="editor-host" hidden></div>
+          <div id="term-resize" class="panel-resize panel-resize-h" hidden aria-hidden="true"></div>
+          <section id="terminal-panel" hidden></section>
+        </div>
+        <div id="ai-resize" class="panel-resize panel-resize-v" hidden aria-hidden="true"></div>
+        <aside id="ai-panel" hidden></aside>
       </div>
-      <div id="loading-state" class="loading-state" hidden aria-hidden="true">
-        <div class="loading-dots"><span></span><span></span><span></span></div>
-      </div>
-    </main>
+    </div>
+    <div id="settings-modal" class="settings-modal" hidden></div>
     <script src="vendor/viewer.bundle.js"></script>
     <script>
-      // Swap highlight.js theme when the page theme flips.
+      // Swap highlight.js stylesheet on the theme's light/dark base (named
+      // themes carry their own base via data-base).
       const themeLink = document.getElementById('hljs-theme');
       const observer = new MutationObserver(() => {
-        const dark = document.documentElement.dataset.theme === 'dark';
+        const dark = document.documentElement.dataset.base === 'dark';
         themeLink.href = dark ? 'vendor/hljs-dark.css' : 'vendor/hljs-light.css';
       });
-      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+      observer.observe(document.documentElement, { attributes: true, attributeFilter: ['data-base'] });
     </script>
   </body>
 </html>

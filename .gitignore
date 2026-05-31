@@ -1,9 +1,7 @@
 # Mac build artifacts
 mac/build/
 mac/build-web/node_modules/
-mac/MDReader.xcodeproj/xcuserdata/
-mac/MDReader.xcodeproj/project.xcworkspace/xcuserdata/
-mac/MDReader.xcodeproj/project.xcworkspace/xcshareddata/
+mac/MDGEM.xcodeproj/
 
 # Win / Rust build artifacts
 win/src-tauri/target/

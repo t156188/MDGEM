@@ -78,7 +78,7 @@ cargo tauri build --bundles nsis
 | 责任 | Mac (`mac/`) | Windows (`win/`) |
 |---|---|---|
 | Markdown 渲染、主题、代码高亮、Mermaid、KaTeX | `Resources/`（共享） | 同一份，frontendDist 指过去 |
-| 文件读 / 窗口 / 菜单 / 文件关联 | `MarkdownDocument.swift` + `MDReaderApp.swift` + `Commands.swift` + Info.plist | `src-tauri/src/lib.rs` + `tauri.conf.json` |
+| 文件读 / 窗口 / 菜单 / 文件关联 | `MarkdownDocument.swift` + `MDGEMApp.swift` + `Commands.swift` + Info.plist | `src-tauri/src/lib.rs` + `tauri.conf.json` |
 | Native ↔ JS 桥 | Swift `evaluateJavaScript` | Tauri events + `bridge.js`（注入为 initialization_script） |
 | 外链 | `NSWorkspace.shared.open` | `tauri-plugin-opener` |
 | 主题持久化 | `@AppStorage` | `tauri-plugin-store`（`settings.json`） |

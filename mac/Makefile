@@ -16,8 +16,8 @@ project: web
 
 build: project
 	xcodebuild \
-		-project MDReader.xcodeproj \
-		-scheme MDReader \
+		-project MDGEM.xcodeproj \
+		-scheme MDGEM \
 		-configuration Release \
 		-derivedDataPath $(BUILD_DIR) \
 		CODE_SIGN_IDENTITY="-" \
@@ -32,4 +32,4 @@ open-sample: build
 	open -a $(APP_PATH) Samples/test-sample.md
 
 clean:
-	rm -rf $(BUILD_DIR) MDReader.xcodeproj Resources/vendor build-web/node_modules
+	rm -rf $(BUILD_DIR) MDGEM.xcodeproj Resources/vendor build-web/node_modules

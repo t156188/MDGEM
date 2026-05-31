@@ -1,4 +1,4 @@
-# MDReader
+# MDGEM
 
 轻量 macOS Markdown 阅读器 — 双击 `.md` 即开。
 
@@ -10,8 +10,8 @@
 ## 目录结构
 
 ```
-MDReader/
-├── MDReader/          # Swift 源码 + Info.plist + entitlements
+MDGEM/
+├── MDGEM/             # Swift 源码 + Info.plist + entitlements
 ├── Resources/         # 内嵌前端（viewer.html/css，vendor 由构建产生）
 ├── build-web/         # esbuild 打包前端依赖
 ├── Samples/           # 测试样例 .md
@@ -37,13 +37,13 @@ make build                 # 装 npm 依赖 → esbuild → xcodegen → xcodebu
 make open-sample           # 用 Release 产物打开 Samples/test-sample.md
 ```
 
-构建产物：`build/Build/Products/Release/MDReader.app`
+构建产物：`build/Build/Products/Release/MDGEM.app`
 
 ## 在 Xcode 里开发
 
 ```sh
 make project
-open MDReader.xcodeproj
+open MDGEM.xcodeproj
 ```
 
 在 Xcode 里直接 ⌘R 运行（前端 vendor 资源只在 `make web` 时重新构建，Xcode 里改 Swift 不触发 npm）。
@@ -52,7 +52,7 @@ open MDReader.xcodeproj
 
 跑过 `make open-sample` 后逐项检查 `Samples/test-sample.md`：
 
-1. 双击 `.md` 自动用 MDReader 打开（首次需在 Finder → Get Info 设默认）
+1. 双击 `.md` 自动用 MDGEM 打开（首次需在 Finder → Get Info 设默认）
 2. 表格、任务列表、删除线
 3. Python / Swift 代码块有色彩 + 悬停出现 Copy 按钮
 4. Mermaid 流程图正常出图

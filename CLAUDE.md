@@ -18,7 +18,7 @@ The front-end (markdown-it + highlight.js + KaTeX + Mermaid + sidebar UI) is **a
 cd mac
 make build            # esbuild → xcodegen → xcodebuild Release → MDGEM.app
 make open-sample      # opens Samples/test-sample.md in the Release build
-make project          # regenerate MDReader.xcodeproj from project.yml
+make project          # regenerate MDGEM.xcodeproj from project.yml
 make web              # rebuild the front-end bundle only (vendor/viewer.bundle.js)
 make clean            # nukes build/, the generated .xcodeproj, Resources/vendor, build-web/node_modules
 ```
@@ -46,6 +46,11 @@ The viewer bundle (`mac/build-web/entries/viewer.entry.js`) exposes a stable sur
 render(text, baseDir)      setTheme({name, pref})         setFileTree(payload)
 setOutline(items)          onScanDirResult(reqId, p)      toast(msg, kind)
 toggleSidebar()            selectAllContent()             scrollToAnchor(id)
+toggleAiPanel()            toggleTerminal()
+onReadFileResult(reqId,p)  onAiConfig(reqId,cfg)          onAiDelta(reqId,{text})
+onAiDone(reqId,{full,toolCalls})  onAiError(reqId,{error})  onAiToolResult(reqId,{ok,result})
+onWriteResult(reqId,{ok,error})   onTermData(id,data)       onTermExit(id,code)
+onMemory(reqId, blob)             onHistoryLoaded(reqId, blob)
 ```
 Both native shells push state in via these calls; the JS calls *back* to native via two different mechanisms:
 
@@ -54,7 +59,7 @@ Both native shells push state in via these calls; the JS calls *back* to native 
 | Native → JS | `webView.evaluateJavaScript("window.MDViewerAPI…")` | `window.emit("mdreader:*", payload)` → `bridge.js` listens → calls `MDViewerAPI.*` |
 | JS → Native | `window.webkit.messageHandlers.<name>.postMessage(...)` | `window.__TAURI__.event.emit("mdreader:*", payload)` → Rust `handle.listen_any(...)` |
 
-`win/src-tauri/src/bridge.js` is injected via `initialization_script` and is the **only** thing translating Tauri's event-based IPC into the `MDViewerAPI` shape. When adding a new IPC: register the script-message handler in `mac/MDReader/MarkdownWebView.swift` AND a `listen_any` in `win/src-tauri/src/lib.rs` AND a translation in `bridge.js`, then expose the result via `MDViewerAPI`. The lazy-folder scan (`scanDir` ↔ `mdreader:scan-dir` / `mdreader:scan-dir-result`) is the canonical example.
+`win/src-tauri/src/bridge.js` is injected via `initialization_script` and is the **only** thing translating Tauri's event-based IPC into the `MDViewerAPI` shape. When adding a new IPC: register the script-message handler in `mac/MDGEM/MarkdownWebView.swift` AND a `listen_any` in `win/src-tauri/src/lib.rs` AND a translation in `bridge.js`, then expose the result via `MDViewerAPI`. The lazy-folder scan (`scanDir` ↔ `mdreader:scan-dir` / `mdreader:scan-dir-result`) is the canonical example. (IPC event names keep the historical `mdreader:` prefix — it's an internal protocol string both shells agree on, not a user-visible identifier.)
 
 ### Workspace pinning
 
@@ -66,16 +71,48 @@ Folders are valid open targets: `Info.plist` declares `public.folder` (rank `Non
 
 `FileTree.swift` (mac) and `lib.rs#scan_tree` (win) share a hardcoded `LAZY_DIR_NAMES` set: `node_modules, dist, build, out, target, vendor, release, coverage, Pods, DerivedData, __pycache__`. When the scanner enters one of these, it emits a stub node `{type:"dir", lazy:true, children:nil}` and skips recursion. The viewer renders these with a `…` hint; clicking issues a `scanDir` / `mdreader:scan-dir` request with a `reqId`, the backend scans one level off the main thread, and `onScanDirResult` merges the children back into `currentTree`. Without this, opening a typical project froze the UI scanning thousands of `node_modules/*/README.md` files. Keep the two lists in sync if you edit them.
 
+The tree lists **all** files (not just markdown) IDE-style; auto-open on workspace entry still only picks a README/`.md`. The viewer's `previewFile()` (in `viewer.entry.js`) decides how to show a clicked file by extension: markdown → host open path; image/video/html → a tag pointed straight at the file URL (win converts via `window.__mdr.convertFileSrc`); text/code → `readFileText` ↔ `mdreader:read-file-text` round-trip (≤2 MB) rendered with highlight.js; anything else → a "preview not supported" card with an "open externally" button.
+
+### AI panel & terminal
+
+Two sidebar-footer buttons (`#sb-ai-btn`, `#sb-term-btn`) toggle a right-side AI panel and a bottom terminal; the `Panels` controller in `viewer.entry.js` owns show/hide + drag-resize, and lazily inits each via `PanelHooks`.
+
+- **AI** (`AIPanel`): a streaming **agent** over an OpenAI-compatible provider (presets in `settings.entry.js#AI_PRESETS`: 智谱 GLM, 智谱 GLM Coding Plan, DeepSeek, 通义千问, 自定义 — all hit `{baseURL}/chat/completions`). HTTP runs **natively** (`AIService.swift` URLSession streaming / `lib.rs ai_chat_stream` reqwest blocking + SSE), never page `fetch`, to dodge `file://` CORS and keep the key out of the web context. Config persists in UserDefaults (mac) / tauri-store key `aiConfig` (win).
+  - **Agent loop lives in `viewer.entry.js`** (`AIPanel.runAgent`): each turn sends `stream:true` + the OpenAI `tools` schema; native streams text deltas (`onAiDelta`) and finishes with `onAiDone({full, toolCalls})`. If the model asked for tool calls, JS executes them and loops, until it stops calling tools (cap: 24 steps). `convo` (the full OpenAI message array incl. assistant `tool_calls` + `tool` results) is the source of truth, re-rendered each step as bubbles + collapsible tool-step chips.
+  - **Tools** (`aiToolSpecs()`): `read_file` / `write_file` reuse the existing `readFileText` ↔ `writeFile` IPC; `edit_file` is read→exact-substring-replace→write in JS. `list_dir` / `search` / `run_command` / `web_search` go through one native channel — `aiTool` ↔ `onAiToolResult` — dispatched by `WorkspaceTools.run` (mac) / `run_agent_tool` (win): workspace grep (skips `LAZY_DIR_NAMES`), one-level dir list, one-shot shell exec (zsh `-lc` mac / `cmd /C`\|`sh -lc` win, merged stdout+stderr, timeout-terminated), and a keyless DuckDuckGo-HTML web search. `run_command`/`web_search` are gated by `AI_CAPS`.
+  - **Gating**: read-only tools (`read_file`/`list_dir`/`search`/`web_search`) auto-run; mutating ones (`edit_file`/`write_file`/`run_command`) go through a confirm modal unless the per-session **自动执行** toggle is on (`autoApprove`). IPC: `aiGetConfig/aiSetConfig/aiChat/aiTool/writeFile` ↔ `onAiConfig/onAiDelta/onAiDone/onAiError/onAiToolResult/onWriteResult`.
+  - **History** (`AIPanel`): multi-session, per-workspace. `convo` is snapshotted into a `sessions` list after every agent turn and on ✚-new-chat; the 🕘 overlay lists/loads/deletes (hard delete) past conversations. Persisted via the `historyLoad/historySave` IPC with `scope:'ai'`, keyed by workspace root path.
+- **Terminal** (`TerminalPanel`): real interactive PTY via xterm.js (`mac/build-web/entries/terminal.entry.js` → `terminal.bundle.js`, lazy-loaded like mermaid). Backends: `PTYSession.swift` (posix_openpt + Process) on mac, `portable-pty` (`TermState` in `lib.rs`) on win. Bytes flow as utf8 strings. IPC: `termCreate/termInput/termResize/termKill` ↔ `onTermData(id,data)/onTermExit(id,code)`, keyed by a JS-generated terminal id.
+  - **Command history + autocomplete** (`TerminalPanel`): the PTY is a raw byte stream, so `handleTermInput`/`trackInput` reconstruct the typed line best-effort and mark it "uncertain" on any cursor movement / Tab-completion / `\x1b[?1049h` alt-screen (vim, less) — suppressing both recording and suggestion until the next fresh prompt. Completed lines are learned into a per-workspace `{cmd,count,lastUsed}` list. A fish-style dim ghost (`refreshGhost`, positioned at `term.buffer.active.cursorX/Y` via the internal cell dims, purely additive — failure only hides it) is accepted with **Right-arrow**; the 🕘 panel lists 常用/最近 commands (click → Ctrl-U + insert, no auto-exec). Persisted via `historyLoad/historySave` with `scope:'term'`.
+
+### History storage
+
+History uses two different shapes under `MDGEM/<scope>/`, both driven by the same four IPC verbs. `scope` is `'chat'` or `'term'`:
+
+```
+MDGEM/chat/index.json   [{id,workspace,title,createdAt,updatedAt}, …]
+MDGEM/chat/<id>.json    {id,workspace,title,createdAt,updatedAt, messages:[…]}   one file per conversation
+MDGEM/term/commands.json {id:"commands", commands:{ "<workspace>": [{cmd,count,lastUsed}, …] }}  single record
+```
+
+- **chat** = one file per conversation. `id` is a front-end-generated filename `YYYY_MMDD_HHMM_xx` (`fmtId()` in `viewer.entry.js`); `index.json` lists metadata so the 🕘 overlay renders without reading every file; the front-end filters the list by the `workspace` field.
+- **term** = a single record `term/commands.json` (fixed id `"commands"`), a `{ "<workspace>": [{cmd,count,lastUsed}] }` frequent-commands table. The terminal learns commands as you type (`recordCommand` bumps count + recency) and drives the inline ghost suggestion from the current workspace's slice; **management (delete a command / 清空全部) lives in the Settings window → 终端**, which merges all workspaces into one 常用 list. There is **no** full terminal transcript and no per-session term files.
+
+Four IPC verbs replace the old load/save pair, all resolving on the existing `onHistoryLoaded(reqId,value)` callback: `historyList(scope)` → index array, `historyRead(scope,id)` → record|null, `historyWrite(scope,id,record)` → `{ok:true}`, `historyDelete(scope,id)` → `{ok:true}`. Mac script handlers (`historyList/Read/Write/Delete` in `MarkdownWebView.swift`) → `HistoryStore.swift`; win `mdreader:history-{list,read,write,delete}` listeners in `lib.rs`; the `mdreader:history-loaded` → `onHistoryLoaded` bridge translation is unchanged (all four verbs reply on it). **Native maintains `index.json`** by lifting a fixed `META_KEYS`/`metaKeys` allow-list (`id,workspace,title,createdAt,updatedAt`) from each written record — the front-end never writes the index directly. `id` is **sanitized** to `[A-Za-z0-9_]` natively (it's used as a filename) to prevent path traversal. Old `history-ai.json`/`history-term.json` from before this layout are not migrated — left in place, ignored.
+
+Both shells deliberately use the friendly folder name `MDGEM`, not the bundle id. On win this means **all** self-managed storage — the `settings.json` store (theme/zoom/recents/aiConfig/uiSettings/workspaceMemory) plus the history files — is relocated from the default `app_data_dir()` (`%APPDATA%\com.mdgem.app\`) into `%APPDATA%\MDGEM\` via `mdgem_data_dir()` (`lib.rs`): history paths build on it directly, and `app.store(settings_path(app))` passes an absolute path so the store plugin lands the file there too. There is **no migration** — a user upgrading from a build that wrote `com.mdgem.app\` simply starts fresh in `MDGEM\`; the old files are small and left in place, ignored. The **one exception** is `.window-state.json`, written by `tauri-plugin-window-state`, which has no dir-override API and stays under `com.mdgem.app`. On mac, UserDefaults is unavoidably `~/Library/Preferences/com.mdgem.app.plist` (macOS convention); only the history files live under the `MDGEM` folder.
+
 ### Build flow specifics
 
-- `mac/project.yml` is the source of truth for the Xcode project. `make build` runs `xcodegen generate` every time, so **do not edit `MDReader.xcodeproj` directly** — it's regenerated from `project.yml`. `Info.plist` and `MDReader.entitlements` are excluded from xcodegen's source globs and edited by hand.
-- `Resources/` (with `type: folder`) is copied wholesale into the bundle. `Resources/vendor/` is produced by `mac/build-web/build.mjs` (esbuild) and **gitignored** (`mac/.gitignore`); the `mac/build-web` step runs as part of `make web` / `make build`.
+- `mac/project.yml` is the source of truth for the Xcode project. `make build` runs `xcodegen generate` every time, so **do not edit `MDGEM.xcodeproj` directly** — it's regenerated from `project.yml`. `Info.plist` and `MDGEM.entitlements` are excluded from xcodegen's source globs and edited by hand.
+- `Resources/` (with `type: folder`) is copied wholesale into the bundle. `Resources/vendor/` is produced by `mac/build-web/build.mjs` (esbuild) and **gitignored** (`mac/.gitignore`); the `mac/build-web` step runs as part of `make web` / `make build`. build.mjs emits three IIFE bundles — `viewer.bundle.js`, `mermaid.bundle.js`, and `terminal.bundle.js` (xterm.js + fit addon, globalName `MDTerm`, lazy-loaded on first terminal open) — plus the hljs/KaTeX/xterm CSS copies.
+- Win adds `reqwest` (native AI HTTP, blocking + rustls) and `portable-pty` (terminal) to `Cargo.toml`; `capabilities/default.json` grants `fs:allow-write-*`. New mac Swift files (`AIService.swift`, `WorkspaceTools.swift`, `PTYSession.swift`, `FileReader.swift`) are picked up automatically by xcodegen's folder glob.
 - After Info.plist changes that affect Launch Services (UTI registration, file associations), run `lsregister -f /path/to/MDGEM.app` before testing or macOS may still use the old metadata.
 - Win uses `tauri-plugin-single-instance`: a second `open` call is forwarded to the existing window via the closure in `lib.rs`'s `single_instance::init`. Drag-drop is wired through `WindowEvent::DragDrop` on `on_window_event`.
 
 ### Version numbers
 
-Five files must move together: `mac/project.yml` (`MARKETING_VERSION`), `mac/MDReader/Info.plist` (`CFBundleShortVersionString`), `mac/build-web/package.json` + `package-lock.json`, `win/src-tauri/Cargo.toml`, `win/src-tauri/tauri.conf.json`. After editing `Cargo.toml`, run `cargo update -p mdreader --offline` to sync `Cargo.lock`.
+Five files must move together: `mac/project.yml` (`MARKETING_VERSION`), `mac/MDGEM/Info.plist` (`CFBundleShortVersionString`), `mac/build-web/package.json` + `package-lock.json`, `win/src-tauri/Cargo.toml`, `win/src-tauri/tauri.conf.json`. After editing `Cargo.toml`, run `cargo update -p mdgem --offline` to sync `Cargo.lock`.
 
 ### Release workflow
 
@@ -89,7 +126,8 @@ Plain commit / push paths **do not** touch version numbers, tags, or GitHub Rele
 
 **Full release flow**, with two confirmation gates. Artifacts are built and published entirely on GitHub; nothing is downloaded locally during the release.
 
-1. Bump the patch version (1.0.0 → 1.0.1 → … → 1.0.11) across the five manifest files (see "Version numbers"). Run `cargo update -p mdreader --offline` to sync `Cargo.lock`. Only bump minor/major when explicitly asked. Exception: if the current version hasn't shipped (no GitHub Release for it), release as-is — don't bump.
+0. **Preflight.** `git status` must be clean — if there are uncommitted changes, ask the user whether to include them in the release commit, stash, or commit separately first. Then `git fetch origin && git pull --ff-only origin main` to sync with remote so the upcoming version-bump commit lands on top of `origin/main` (avoids reject-on-push / merge conflicts on the release commit). If `--ff-only` refuses (local has diverged), stop and ask the user before doing anything destructive.
+1. Bump the patch version (1.0.0 → 1.0.1 → … → 1.0.11) across the five manifest files (see "Version numbers"). Run `cargo update -p mdgem --offline` to sync `Cargo.lock`. Only bump minor/major when explicitly asked. Exception: if the current version hasn't shipped (no GitHub Release for it), release as-is — don't bump.
 2. **🛑 GATE 1 — version confirmation.** Show the user the new version and wait for confirmation before any commit.
 3. On confirm: commit (`Release X.Y.Z: <subject>`) and `git push origin main`. This also triggers the per-push smoke-test workflows (`macos-build.yml` / `windows-build.yml`), which are independent of the release.
 4. Create and push the tag: `git tag -a vX.Y.Z -m "MDGEM X.Y.Z"` + `git push origin vX.Y.Z`. The tag push triggers `.github/workflows/release.yml`, which builds mac arm64 + intel + win and creates a **draft** GitHub Release with the three artifacts attached.

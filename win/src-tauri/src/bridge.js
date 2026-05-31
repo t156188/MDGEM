@@ -10,6 +10,13 @@
     return path;
   }
 
+  // Expose a tiny helper surface the shared bundle can call to turn an OS
+  // file path into an asset:// URL WebView2 can load (Mac uses file:// URLs
+  // directly, so the bundle no-ops there). Keep this stable — viewer.bundle.js
+  // feature-detects `window.__mdr`.
+  window.__mdr = window.__mdr || {};
+  window.__mdr.convertFileSrc = convertFileSrc;
+
   function decodeFileUrl(url) {
     // file:///C:/path/foo.png → /C:/path/foo.png → C:/path/foo.png
     var stripped = url.replace(/^file:\/\//i, '');
@@ -103,6 +110,90 @@
       var p = (e && e.payload) || [];
       if (window.MDViewerAPI && typeof window.MDViewerAPI.setRecents === 'function') {
         window.MDViewerAPI.setRecents(Array.isArray(p) ? p : []);
+      }
+    });
+    t.event.listen('mdreader:read-file-result', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onReadFileResult === 'function') {
+        window.MDViewerAPI.onReadFileResult(p.reqId, p);
+      }
+    });
+    t.event.listen('mdreader:ai-config', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiConfig === 'function') {
+        window.MDViewerAPI.onAiConfig(p.reqId, p.config || null);
+      }
+    });
+    t.event.listen('mdreader:ai-config-changed', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiConfigChanged === 'function') {
+        window.MDViewerAPI.onAiConfigChanged(p);
+      }
+    });
+    t.event.listen('mdreader:settings', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onSettings === 'function') {
+        window.MDViewerAPI.onSettings(p.reqId, p.settings || null);
+      }
+    });
+    t.event.listen('mdreader:settings-changed', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onSettingsChanged === 'function') {
+        window.MDViewerAPI.onSettingsChanged(p);
+      }
+    });
+    t.event.listen('mdreader:memory', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onMemory === 'function') {
+        window.MDViewerAPI.onMemory(p.reqId, p.memory || null);
+      }
+    });
+    t.event.listen('mdreader:history-loaded', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onHistoryLoaded === 'function') {
+        window.MDViewerAPI.onHistoryLoaded(p.reqId, p.history || null);
+      }
+    });
+    t.event.listen('mdreader:ai-delta', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiDelta === 'function') {
+        window.MDViewerAPI.onAiDelta(p.reqId, { text: p.text || '' });
+      }
+    });
+    t.event.listen('mdreader:ai-done', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiDone === 'function') {
+        window.MDViewerAPI.onAiDone(p.reqId, { full: p.full, toolCalls: p.toolCalls || null });
+      }
+    });
+    t.event.listen('mdreader:ai-error', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiError === 'function') {
+        window.MDViewerAPI.onAiError(p.reqId, { error: p.error });
+      }
+    });
+    t.event.listen('mdreader:ai-tool-result', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onAiToolResult === 'function') {
+        window.MDViewerAPI.onAiToolResult(p.reqId, { ok: !!p.ok, result: p.result || '' });
+      }
+    });
+    t.event.listen('mdreader:write-result', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onWriteResult === 'function') {
+        window.MDViewerAPI.onWriteResult(p.reqId, { ok: !!p.ok, error: p.error || null });
+      }
+    });
+    t.event.listen('mdreader:term-data', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onTermData === 'function') {
+        window.MDViewerAPI.onTermData(p.id, p.data);
+      }
+    });
+    t.event.listen('mdreader:term-exit', function (e) {
+      var p = (e && e.payload) || null;
+      if (p && window.MDViewerAPI && typeof window.MDViewerAPI.onTermExit === 'function') {
+        window.MDViewerAPI.onTermExit(p.id, p.code);
       }
     });
     if (cb) cb();

@@ -2,10 +2,11 @@ import SwiftUI
 import AppKit
 
 extension Notification.Name {
-    static let mdreaderToggleSidebar = Notification.Name("mdreader.toggleSidebar")
+    static let mdgemToggleSidebar = Notification.Name("mdgem.toggleSidebar")
+    static let mdgemSave = Notification.Name("mdgem.save")
 }
 
-struct MDReaderCommands: Commands {
+struct MDGEMCommands: Commands {
     @Binding var themeOverride: String
     @Binding var pageZoom: Double
 
@@ -14,6 +15,13 @@ struct MDReaderCommands: Commands {
             Button("About MDGEM") {
                 NSApp.orderFrontStandardAboutPanel()
             }
+        }
+        // Standard macOS Settings… (⌘,) — opens the standalone settings window.
+        CommandGroup(replacing: .appSettings) {
+            Button("Settings…") {
+                NotificationCenter.default.post(name: .mdgemOpenSettings, object: nil)
+            }
+            .keyboardShortcut(",", modifiers: .command)
         }
         // The default File → Open… (provided by DocumentGroup) uses an
         // NSOpenPanel hard-coded to canChooseDirectories=false. Adding
@@ -25,9 +33,19 @@ struct MDReaderCommands: Commands {
             }
             .keyboardShortcut("o", modifiers: [.command, .shift])
         }
+        // The document is read-only (no writable types), so DocumentGroup's
+        // default ⌘S "Save" is permanently disabled and just swallows the
+        // shortcut. Replace it with our own Save that forwards ⌘S to the page's
+        // code/text editor (a no-op when not editing).
+        CommandGroup(replacing: .saveItem) {
+            Button("Save") {
+                NotificationCenter.default.post(name: .mdgemSave, object: nil)
+            }
+            .keyboardShortcut("s", modifiers: .command)
+        }
         CommandGroup(after: .toolbar) {
             Button("Toggle Sidebar") {
-                NotificationCenter.default.post(name: .mdreaderToggleSidebar, object: nil)
+                NotificationCenter.default.post(name: .mdgemToggleSidebar, object: nil)
             }
             .keyboardShortcut("b", modifiers: .command)
             Divider()
