@@ -1,0 +1,21 @@
+{
+  "name": "my-project",
+  "version": "1.0.0",
+  "description": "JSON 配置文件模板",
+  "private": true,
+  "settings": {
+    "theme": "auto",
+    "fontSize": 14,
+    "lineHeight": 1.6,
+    "features": ["preview", "outline", "search"]
+  },
+  "server": {
+    "host": "localhost",
+    "port": 8080,
+    "https": false
+  },
+  "dependencies": {
+    "example-lib": "^2.3.0"
+  },
+  "tags": ["template", "config", "example"]
+}

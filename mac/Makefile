@@ -29,7 +29,7 @@ run: build
 	open $(APP_PATH) --args -NSDocumentRevisionsDebugMode YES
 
 open-sample: build
-	open -a $(APP_PATH) Samples/test-sample.md
+	open $(APP_PATH) Samples/test-sample.md
 
 clean:
 	rm -rf $(BUILD_DIR) MDGEM.xcodeproj Resources/vendor build-web/node_modules

@@ -1,7 +1,0 @@
-MDGEM 预览测试 — 纯文本
-=======================
-
-这是一个 .txt 文件，应当以等宽字体原样显示，不做语法高亮。
-This is a plain text file. Tabs and    spaces should render verbatim.
-
-包含中文、emoji ✨🚀、以及一些符号： <html> & "quotes" 'apos' © ®

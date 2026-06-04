@@ -1,7 +1,0 @@
-{
-  "name": "mdgem-preview-demo",
-  "version": "1.0.0",
-  "features": ["markdown", "image", "video", "html", "code"],
-  "nested": { "enabled": true, "count": 42, "ratio": 0.618 },
-  "list": [1, 2, 3, null, false]
-}
