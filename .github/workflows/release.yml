@@ -63,8 +63,6 @@ jobs:
 
       - name: Build .app (${{ matrix.arch }})
         working-directory: mac
-        env:
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           xcodebuild \
             -project MDGEM.xcodeproj \
@@ -73,12 +71,28 @@ jobs:
             -derivedDataPath build \
             -arch ${{ matrix.arch }} \
             ONLY_ACTIVE_ARCH=NO \
-            CODE_SIGN_STYLE=Manual \
-            CODE_SIGN_IDENTITY="Developer ID Application" \
-            DEVELOPMENT_TEAM="$APPLE_TEAM_ID" \
-            ENABLE_HARDENED_RUNTIME=YES \
-            OTHER_CODE_SIGN_FLAGS="--timestamp" \
+            CODE_SIGNING_ALLOWED=NO \
             build
+
+      - name: Sign with Developer ID (hardened runtime + timestamp)
+        working-directory: mac
+        run: |
+          APP="build/Build/Products/Release/MDGEM.app"
+          ID="$(security find-identity -v -p codesigning "$RUNNER_TEMP/signing.keychain-db" \
+                | awk -F'"' '/Developer ID Application/{print $2; exit}')"
+          echo "Signing identity: $ID"
+          # Sign nested Mach-O inside-out (Swift runtime dylibs, then any frameworks)
+          if [ -d "$APP/Contents/Frameworks" ]; then
+            find "$APP/Contents/Frameworks" -type f \( -name "*.dylib" -o -name "*.so" \) -print0 \
+              | xargs -0 -I{} codesign --force --options runtime --timestamp --sign "$ID" {}
+            find "$APP/Contents/Frameworks" -type d -name "*.framework" -print0 \
+              | xargs -0 -I{} codesign --force --options runtime --timestamp --sign "$ID" {}
+          fi
+          # Sign the app bundle last
+          codesign --force --options runtime --timestamp --sign "$ID" "$APP"
+          # Fail early if the signature isn't valid (before wasting a notarization)
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          codesign -dvvv "$APP" 2>&1 | grep -E "Authority|TeamIdentifier|Timestamp|Runtime|flags" | head
 
       - name: Package as DMG
         working-directory: mac
