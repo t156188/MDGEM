@@ -2780,6 +2780,84 @@ body.settings-page { display: flex; height: 100vh; overflow: hidden; }
 .ai-send-btn:hover { transform: translateY(-1px); filter: brightness(1.08); box-shadow: 0 7px 20px -7px var(--accent); }
 .ai-send-btn:active { transform: translateY(0) scale(0.92); }
 .ai-send-btn svg { width: 16px; height: 16px; fill: currentColor; transform: translateX(0.5px); }
+/* Stop state: a calmer red disc with a square glyph (no translate nudge). */
+.ai-send-btn.is-stop {
+  background: radial-gradient(circle at 32% 26%, rgba(255, 255, 255, 0.35), transparent 60%), #e0564f;
+  box-shadow: 0 5px 16px -7px #e0564f;
+}
+.ai-send-btn.is-stop:hover { box-shadow: 0 7px 20px -7px #e0564f; }
+.ai-send-btn.is-stop svg { transform: none; }
+
+/* "Agent is working" indicator shown between turns / during a tool run. */
+.ai-working {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 4px 6px;
+  margin: 2px 2px 2px 4px;
+  color: var(--muted);
+  font-size: 0.86em;
+  animation: ai-bubble-in 0.22s ease;
+}
+.ai-working-label { opacity: 0.85; }
+
+/* Soft-cap banner: the loop hit maxSteps with work still pending. */
+.ai-cap {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  margin: 6px 4px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg);
+  animation: ai-bubble-in 0.22s ease;
+}
+.ai-cap-text { flex: 1; min-width: 140px; color: var(--muted); font-size: 0.88em; }
+
+/* Todo checklist card produced by the todo_write tool. */
+.ai-todo {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--code-bg);
+  padding: 9px 11px;
+  animation: ai-bubble-in 0.22s ease;
+}
+.ai-todo-head {
+  font-size: 0.78em;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  text-transform: uppercase;
+  margin-bottom: 7px;
+}
+.ai-todo-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 2px 0;
+  font-size: 0.9em;
+  line-height: 1.45;
+}
+.ai-todo-box {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+  border: 1.5px solid var(--border);
+  border-radius: 5px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: var(--fg);
+}
+.ai-todo-text { color: var(--fg); }
+.ai-todo-item.is-completed .ai-todo-box { background: var(--accent); border-color: var(--accent); color: #fff; }
+.ai-todo-item.is-completed .ai-todo-text { color: var(--muted); text-decoration: line-through; }
+.ai-todo-item.is-in_progress .ai-todo-box { border-color: var(--accent); color: var(--accent); }
+.ai-todo-item.is-in_progress .ai-todo-text { font-weight: 600; }
 
 /* Empty state: no AI configured yet. */
 .ai-empty-setup {

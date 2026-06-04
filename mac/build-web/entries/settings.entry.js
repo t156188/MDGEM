@@ -147,7 +147,7 @@ window.MDViewerAPI = {
 };
 
 // ---- AI config ----
-const AI_PREFS_DEFAULTS = { approvalPolicy: 'ask', temperatureEnabled: false, temperature: 0.7, systemPrompt: '', maxSteps: 24 };
+const AI_PREFS_DEFAULTS = { approvalPolicy: 'ask', temperatureEnabled: false, temperature: 0.7, systemPrompt: '', maxSteps: 50 };
 
 // Execution-permission levels for the agent (maps to viewer gating).
 const AI_APPROVAL = [
@@ -201,7 +201,7 @@ function normalizeAi(c) {
       out.prefs.temperature = Number.isFinite(t) ? Math.max(0, Math.min(2, t)) : 0.7;
       out.prefs.systemPrompt = typeof c.prefs.systemPrompt === 'string' ? c.prefs.systemPrompt : '';
       const ms = parseInt(c.prefs.maxSteps, 10);
-      out.prefs.maxSteps = Number.isFinite(ms) ? Math.max(1, Math.min(100, ms)) : 24;
+      out.prefs.maxSteps = Number.isFinite(ms) ? Math.max(1, Math.min(500, ms)) : 50;
     }
     const all = aiAllModels(out);
     if (c.defaultModel && all.some((x) => x.providerId === c.defaultModel.providerId && x.model === c.defaultModel.model)) {
@@ -328,9 +328,9 @@ function render() {
         <textarea class="set-textarea" id="ai-pref-prompt" rows="4" placeholder="留空则用内置提示词；填写则追加到内置之后"></textarea>
         <h2 class="settings-h2">最大工具步数</h2>
         <div class="set-font-row">
-          <span class="set-font-label">每次回复最多调用工具</span>
+          <span class="set-font-label">单次任务最多工具步数（撞上限会询问是否继续）</span>
           <button class="set-step" data-step="-1" id="ai-steps-dec" type="button">−</button>
-          <input class="set-range" id="ai-pref-steps" type="range" min="1" max="60" step="1">
+          <input class="set-range" id="ai-pref-steps" type="range" min="1" max="200" step="1">
           <button class="set-step" data-step="1" id="ai-steps-inc" type="button">+</button>
           <span class="set-font-val" id="ai-steps-num"></span>
         </div>
@@ -607,7 +607,7 @@ function wireAiStatic() {
     aiSave();
   });
   document.getElementById('ai-pref-prompt')?.addEventListener('input', (e) => { A.prefs.systemPrompt = e.target.value; aiSave(); });
-  const setSteps = (n) => { A.prefs.maxSteps = Math.max(1, Math.min(60, n)); syncAiPrefs(); aiSave(); };
+  const setSteps = (n) => { A.prefs.maxSteps = Math.max(1, Math.min(200, n)); syncAiPrefs(); aiSave(); };
   document.getElementById('ai-pref-steps')?.addEventListener('input', (e) => setSteps(parseInt(e.target.value, 10) || 24));
   document.getElementById('ai-steps-dec')?.addEventListener('click', () => setSteps(A.prefs.maxSteps - 1));
   document.getElementById('ai-steps-inc')?.addEventListener('click', () => setSteps(A.prefs.maxSteps + 1));

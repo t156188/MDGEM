@@ -1630,6 +1630,8 @@ const AI_SYSTEM_PROMPT =
   '- Match the existing language, tone and formatting of whatever you edit.\n' +
   '- Keep going across as many tool calls as needed until the task is genuinely done, then end ' +
   'with a short summary of what you did.\n' +
+  '- For any task with 3+ steps, call todo_write first to lay out a checklist, then update it ' +
+  '(mark items in_progress / completed) as you go so the user can follow your progress.\n' +
   '- Use absolute paths. The workspace root and the currently open file are given below.\n' +
   '- Reply in the user\'s language. Be concise; no filler.';
 
@@ -1705,8 +1707,26 @@ const WEB_TOOL_SPEC = { type: 'function', function: {
   }, required: ['query'] },
 } };
 
+const TODO_TOOL_SPEC = { type: 'function', function: {
+  name: 'todo_write',
+  description: 'Create or update a visible TODO checklist for a multi-step task. Call it at the ' +
+    'start of any task with 3+ steps, then call it again whenever progress changes to mark items ' +
+    'in_progress / completed. Always send the FULL list (the latest call replaces the displayed ' +
+    'list). Keep exactly one item in_progress at a time. This is for tracking only — it does not ' +
+    'execute anything.',
+  parameters: { type: 'object', properties: {
+    todos: { type: 'array', description: 'The full ordered checklist', items: {
+      type: 'object', properties: {
+        content: { type: 'string', description: 'Short imperative description of the step' },
+        status: { type: 'string', enum: ['pending', 'in_progress', 'completed'] },
+      }, required: ['content', 'status'],
+    } },
+  }, required: ['todos'] },
+} };
+
 function aiToolSpecs() {
   const specs = FILE_TOOL_SPECS.slice();
+  specs.push(TODO_TOOL_SPEC);
   if (AI_CAPS.command) specs.push(CMD_TOOL_SPEC);
   if (AI_CAPS.web) specs.push(WEB_TOOL_SPEC);
   return specs;
@@ -1763,7 +1783,7 @@ const AI_PREFS_DEFAULTS = {
   temperatureEnabled: false,
   temperature: 0.7,
   systemPrompt: '',
-  maxSteps: 24,
+  maxSteps: 50,
 };
 
 function aiGenId() {
@@ -1805,7 +1825,7 @@ function normalizeAiConfig(c) {
     out.prefs.temperature = Number.isFinite(t) ? Math.max(0, Math.min(2, t)) : 0.7;
     out.prefs.systemPrompt = typeof p.systemPrompt === 'string' ? p.systemPrompt : '';
     const ms = parseInt(p.maxSteps, 10);
-    out.prefs.maxSteps = Number.isFinite(ms) ? Math.max(1, Math.min(100, ms)) : 24;
+    out.prefs.maxSteps = Number.isFinite(ms) ? Math.max(1, Math.min(500, ms)) : 50;
   }
   // Validate defaultModel against available models; else fall back to the first.
   const all = aiAllModels(out);
@@ -2068,6 +2088,9 @@ const AIPanel = (() => {
   let autoLocked = null;      // when Auto probes a working model, it's locked here {providerId,model} for the rest of the session
   let convo = [];             // full OpenAI message array (source of truth)
   let busy = false;
+  let aborted = false;        // set by the ⏹ stop button — unwinds runAgent at the next checkpoint
+  let capPending = false;     // true when the loop hit maxSteps with the task unfinished → offer 继续
+  let activity = '';          // human-readable "what the agent is doing now" for the working indicator
   // Inline approval (instead of a blocking modal): a mutating tool that needs
   // confirmation parks itself in the chat as a tool-step chip with the diff /
   // command + 允许 / 拒绝 buttons. `approvalCtxId` is the tool-call id currently
@@ -2239,6 +2262,10 @@ const AIPanel = (() => {
     const form = b.querySelector('.ai-compose');
     const input = b.querySelector('.ai-input');
     form.addEventListener('submit', (e) => { e.preventDefault(); send(input); });
+    // While busy the button becomes ⏹ (type=button) → click stops the agent.
+    b.querySelector('.ai-send-btn').addEventListener('click', (e) => {
+      if (busy) { e.preventDefault(); abortAgent(); }
+    });
     input.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(input); }
     });
@@ -2258,6 +2285,7 @@ const AIPanel = (() => {
       snapshotCurrent();                       // keep what's there before clearing
       convo = []; currentSessionId = null; currentTitle = null; undoStack = []; updateUndoBtn();
       autoLocked = null;                       // fresh chat re-picks an Auto model
+      capPending = false;
       pendingApprovals.clear(); stepPreview.clear();
       closeHistory();
       renderMessages();
@@ -2377,6 +2405,7 @@ const AIPanel = (() => {
       case 'write_file':  return `写入 ${baseName(a.path)}`;
       case 'run_command': return `运行 ${String(a.command || '').slice(0, 60)}`;
       case 'web_search':  return `联网搜索 “${a.query || ''}”`;
+      case 'todo_write':  return '更新任务清单';
       default:            return name;
     }
   }
@@ -2388,6 +2417,59 @@ const AIPanel = (() => {
     bubble.className = 'ai-bubble';
     bubble.textContent = text;
     row.appendChild(bubble);
+    return row;
+  }
+
+  // SVG glyphs for the send button's two states (paper plane / stop square).
+  const SEND_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .65.65 1.1 1.39.91z"/></svg>';
+  const STOP_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></svg>';
+
+  // Keep the composer button in sync with `busy`: send (submit) ⇄ stop (abort).
+  function updateSendBtn() {
+    const btn = body()?.querySelector('.ai-send-btn');
+    if (!btn) return;
+    if (busy) {
+      btn.classList.add('is-stop');
+      btn.type = 'button';
+      btn.title = '停止';
+      btn.setAttribute('aria-label', '停止');
+      btn.innerHTML = STOP_SVG;
+    } else {
+      btn.classList.remove('is-stop');
+      btn.type = 'submit';
+      btn.title = '发送（回车）';
+      btn.setAttribute('aria-label', '发送');
+      btn.innerHTML = SEND_SVG;
+    }
+  }
+
+  // A checklist card rendered from a todo_write tool call's arguments.
+  function todoRow(tc) {
+    let todos = [];
+    try { todos = (JSON.parse(tc.function?.arguments || '{}').todos) || []; } catch {}
+    const row = document.createElement('div');
+    row.className = 'ai-msg ai-msg-tool';
+    const card = document.createElement('div');
+    card.className = 'ai-todo';
+    const head = document.createElement('div');
+    head.className = 'ai-todo-head';
+    const done = todos.filter((t) => t && t.status === 'completed').length;
+    head.textContent = `任务清单 · ${done}/${todos.length}`;
+    card.appendChild(head);
+    for (const t of todos) {
+      const st = (t && t.status) || 'pending';
+      const item = document.createElement('div');
+      item.className = `ai-todo-item is-${st}`;
+      const box = document.createElement('span');
+      box.className = 'ai-todo-box';
+      box.textContent = st === 'completed' ? '✓' : (st === 'in_progress' ? '▸' : '');
+      const txt = document.createElement('span');
+      txt.className = 'ai-todo-text';
+      txt.textContent = (t && t.content) || '';
+      item.appendChild(box); item.appendChild(txt);
+      card.appendChild(item);
+    }
+    row.appendChild(card);
     return row;
   }
 
@@ -2509,7 +2591,9 @@ const AIPanel = (() => {
         if (m._attach && m._attach.length) list.appendChild(sentAttachRow(m._attach));
       } else if (m.role === 'assistant') {
         if (m.content) list.appendChild(bubbleRow('assistant', m.content));
-        if (m.tool_calls) for (const tc of m.tool_calls) list.appendChild(stepRow(tc, results[tc.id]));
+        if (m.tool_calls) for (const tc of m.tool_calls) {
+          list.appendChild(tc.function?.name === 'todo_write' ? todoRow(tc) : stepRow(tc, results[tc.id]));
+        }
       }
     }
     if (streaming) {
@@ -2522,8 +2606,30 @@ const AIPanel = (() => {
       else bubble.innerHTML = '<span class="ai-typing"><span></span><span></span><span></span></span>';
       row.appendChild(bubble);
       list.appendChild(row);
+    } else if (busy) {
+      // Between turns / while a tool runs there's no live bubble — show what the
+      // agent is doing plus the dot animation so the panel never looks frozen.
+      const row = document.createElement('div');
+      row.className = 'ai-working';
+      row.innerHTML = '<span class="ai-typing"><span></span><span></span><span></span></span>'
+        + `<span class="ai-working-label"></span>`;
+      row.querySelector('.ai-working-label').textContent = activity || '工作中…';
+      list.appendChild(row);
+    }
+    if (capPending && !busy) {
+      const row = document.createElement('div');
+      row.className = 'ai-cap';
+      const txt = document.createElement('span');
+      txt.className = 'ai-cap-text';
+      txt.textContent = `已达到 ${(config.prefs && config.prefs.maxSteps) || 50} 步上限，任务可能还没完成。`;
+      const btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'ai-btn primary'; btn.textContent = '继续';
+      btn.addEventListener('click', () => continueAgent());
+      row.appendChild(txt); row.appendChild(btn);
+      list.appendChild(row);
     }
     list.scrollTop = list.scrollHeight;
+    updateSendBtn();
   }
 
   async function send(input) {
@@ -2579,11 +2685,12 @@ const AIPanel = (() => {
   }
 
   async function runAgent() {
-    busy = true;
-    const maxSteps = (config.prefs && config.prefs.maxSteps) || 24;
+    busy = true; aborted = false; capPending = false;
+    const maxSteps = (config.prefs && config.prefs.maxSteps) || 50;
+    let step = 0;
     try {
-      for (let step = 0; step < maxSteps; step++) {
-        streaming = true; streamText = '';
+      for (; step < maxSteps; step++) {
+        streaming = true; streamText = ''; activity = '思考中…';
         renderMessages();
         const res = await chatTurn((t) => {
           streamText += t;
@@ -2593,9 +2700,10 @@ const AIPanel = (() => {
           if (list) list.scrollTop = list.scrollHeight;
         });
         streaming = false;
+        if (aborted || (res && res.aborted)) { step = -1; break; }   // step<0 → stopped, no cap prompt
         if (!res || res.error) {
           convo.push({ role: 'assistant', content: `⚠️ ${(res && res.error) || '请求失败'}` });
-          break;
+          step = -1; break;
         }
         const tcs = Array.isArray(res.toolCalls) ? res.toolCalls : null;
         const asst = { role: 'assistant', content: res.full || '' };
@@ -2607,23 +2715,61 @@ const AIPanel = (() => {
         }
         convo.push(asst);
         renderMessages();
-        if (!tcs || !tcs.length) break;
+        if (!tcs || !tcs.length) { step = -1; break; }   // model answered with no tools → done
         for (const tc of tcs) {
+          if (aborted) break;
           let args = {};
           try { args = JSON.parse(tc.arguments || '{}'); } catch {}
+          activity = toolStepLabel(tc.name, tc.arguments);
           approvalCtxId = tc.id;                 // so a mutating tool parks its inline approval on this chip
           const result = await executeAiTool(tc.name, args);
           approvalCtxId = null;
           convo.push({ role: 'tool', tool_call_id: tc.id, content: clip(result, 16000) });
           renderMessages();
         }
+        if (aborted) { step = -1; break; }
       }
+      // step >= maxSteps here means we exhausted the budget while tools were still
+      // being requested — surface a 继续 affordance instead of silently truncating.
+      if (step >= maxSteps) capPending = true;
+      else if (aborted) convo.push({ role: 'assistant', content: '⏹ 已停止。' });
     } finally {
-      busy = false; streaming = false;
+      busy = false; streaming = false; activity = '';
+      // Resolve any approval still parked on a chip (user hit stop mid-confirm).
+      for (const [, resolve] of pendingApprovals) resolve(false);
+      pendingApprovals.clear();
       renderMessages();
       try { snapshotCurrent(); } catch {}
       try { maybeGenerateTitle(); } catch {}
     }
+  }
+
+  // ⏹ Stop: flag the loop and immediately resolve the in-flight chat turn / tool
+  // round-trip so runAgent unwinds at its next checkpoint without waiting for the
+  // native request to finish. (The native stream is abandoned, not hard-cancelled.)
+  function abortAgent() {
+    if (!busy) return;
+    aborted = true;
+    activity = '正在停止…';
+    for (const [reqId, resolve] of [...pendingAi]) {
+      if (reqId.startsWith('ai-chat-')) {
+        pendingAi.delete(reqId); aiDeltaHandlers.delete(reqId); resolve({ aborted: true });
+      } else if (reqId.startsWith('ai-tool-')) {
+        pendingAi.delete(reqId); resolve({ ok: false, result: 'Aborted by user.' });
+      }
+    }
+    for (const [, resolve] of pendingApprovals) resolve(false);
+    pendingApprovals.clear();
+    updateSendBtn();
+  }
+
+  // Resume after a soft cap: the convo already ends with tool results, so a fresh
+  // runAgent picks up exactly where the budget ran out.
+  function continueAgent() {
+    if (busy) return;
+    capPending = false;
+    renderMessages();
+    runAgent();
   }
 
   function buildApiMessages() {
@@ -2922,6 +3068,7 @@ const AIPanel = (() => {
     currentTitle = (rec.title || (sessions.find((x) => x.id === id) || {}).title) || null;
     undoStack = []; updateUndoBtn();
     autoLocked = null;                 // loaded conversation re-arms Auto's probe
+    capPending = false;
     pendingApprovals.clear(); stepPreview.clear();
     closeHistory();
     renderMessages();
@@ -2968,6 +3115,7 @@ const AIPanel = (() => {
           });
           return r.result;
         }
+        case 'todo_write':  return applyTodoTool(args);
         case 'edit_file':   return applyEditTool(args);
         case 'write_file':  return applyWriteTool(args);
         case 'run_command': return runCommandTool(args);
@@ -2980,6 +3128,15 @@ const AIPanel = (() => {
     } catch (e) {
       return `Error: ${(e && e.message) || e}`;
     }
+  }
+
+  // Pure tracking tool: the checklist is rendered from the tool-call args in
+  // renderMessages, so here we just validate and acknowledge.
+  function applyTodoTool({ todos }) {
+    if (!Array.isArray(todos)) return 'Error: todos must be an array';
+    const n = todos.length;
+    const done = todos.filter((t) => t && t.status === 'completed').length;
+    return `Todo list updated (${done}/${n} done).`;
   }
 
   async function applyEditTool({ path, old, new: rep, replace_all }) {
