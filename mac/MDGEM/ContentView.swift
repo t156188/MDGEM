@@ -8,7 +8,7 @@ struct ContentView: View {
     @StateObject private var session: DocumentSession
     @Environment(\.colorScheme) private var colorScheme
     @AppStorage("pageZoom") private var pageZoom: Double = 1.0
-    @AppStorage("themeOverride") private var themeOverride: String = "system"
+    @AppStorage("themeOverride") private var themeOverride: String = "dark"
 
     init(document: MarkdownDocument, fileURL: URL?) {
         self.document = document
@@ -72,6 +72,9 @@ struct ContentView: View {
             // document windows share one autosave name, so a newly opened doc
             // appears at the last-used geometry (and cascades if one is open).
             window.persistFrame(autosaveName: "MDGEMDocumentWindow")
+            // Frame autosave doesn't cover native fullscreen — track that
+            // separately under one shared key so reopening restores it.
+            window.persistFullscreen(key: "MDGEMDocumentWindowFullscreen")
         })
     }
 

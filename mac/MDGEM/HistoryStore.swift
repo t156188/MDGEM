@@ -19,7 +19,7 @@ import Foundation
 enum HistoryStore {
     /// Index metadata fields copied from a record into `index.json`. Records may
     /// carry more (e.g. `messages` / `lines`); those stay only in the per-id file.
-    private static let metaKeys = ["id", "workspace", "title", "createdAt", "updatedAt"]
+    private static let metaKeys = ["id", "workspace", "title", "createdAt", "updatedAt", "deleted"]
 
     // MARK: - Paths
 

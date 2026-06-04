@@ -582,7 +582,7 @@ fn settings_path(app: &AppHandle) -> PathBuf {
 /// The front-end owns the record schema; only `META_KEYS` are lifted into the
 /// index. `id` comes from the web context and is used as a filename, so it is
 /// sanitized to `[A-Za-z0-9_]` to prevent path traversal.
-const META_KEYS: &[&str] = &["id", "workspace", "title", "createdAt", "updatedAt"];
+const META_KEYS: &[&str] = &["id", "workspace", "title", "createdAt", "updatedAt", "deleted"];
 
 fn history_scope_dir(app: &AppHandle, scope: &str) -> Option<PathBuf> {
     let safe = if scope == "chat" || scope == "term" { scope } else { "misc" };
@@ -1645,8 +1645,8 @@ fn rebuild_menu(app: &AppHandle) -> tauri::Result<()> {
         .build(app)?;
     let appearance = SubmenuBuilder::new(app, "Appearance")
         .item(&theme_system)
-        .item(&theme_light)
         .item(&theme_dark)
+        .item(&theme_light)
         .build()?;
 
     let zoom_in = MenuItemBuilder::with_id("zoomIn", "Zoom In")
@@ -1978,13 +1978,35 @@ pub fn run() {
                 }
             });
 
-            // External-link forwarder: JS catches link clicks and emits the URL.
+            // External-open forwarder. Two payload shapes share this channel:
+            // bridge.js link clicks emit a bare URL string; the file "外部打开"
+            // path emits { url, browser } where browser=true (html) asks for a
+            // browser, preferring Chrome and falling back to the default.
             let h_link = handle.clone();
             handle.listen_any("mdreader:open-external", move |event| {
-                let raw: String =
-                    serde_json::from_str(event.payload()).unwrap_or_default();
-                if !raw.is_empty() {
-                    let _ = h_link.opener().open_url(raw, None::<&str>);
+                let payload = event.payload();
+                let (url, browser) = serde_json::from_str::<serde_json::Value>(payload)
+                    .ok()
+                    .and_then(|v| {
+                        if let Some(s) = v.as_str() {
+                            Some((s.to_string(), false))
+                        } else {
+                            let url = v.get("url")?.as_str()?.to_string();
+                            let browser = v.get("browser").and_then(|b| b.as_bool()).unwrap_or(false);
+                            Some((url, browser))
+                        }
+                    })
+                    .unwrap_or_default();
+                if url.is_empty() {
+                    return;
+                }
+                if browser {
+                    // Try Chrome first; on any error fall back to the default.
+                    if h_link.opener().open_url(url.as_str(), Some("chrome")).is_err() {
+                        let _ = h_link.opener().open_url(url.as_str(), None::<&str>);
+                    }
+                } else {
+                    let _ = h_link.opener().open_url(url.as_str(), None::<&str>);
                 }
             });
 

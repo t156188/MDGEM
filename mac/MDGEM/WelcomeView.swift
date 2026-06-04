@@ -231,6 +231,37 @@ extension NSWindow {
         setFrameUsingName(name)        // apply the saved frame (no-op if none yet)
         setFrameAutosaveName(name)     // persist future moves/resizes
     }
+
+    /// Restore + remember this window's native-fullscreen state under `key`.
+    /// AppKit's frame autosave only stores the non-fullscreen frame, never the
+    /// fullscreen flag, so we track it ourselves: re-enter fullscreen on open if
+    /// the last session left it fullscreen, then record every enter/exit. The
+    /// `FullscreenStateKeeper` is retained on the window via associated objects,
+    /// so observation lives as long as the window. No-op if already wired.
+    func persistFullscreen(key: String) {
+        guard objc_getAssociatedObject(self, &fullscreenKeeperKey) == nil else { return }
+        if UserDefaults.standard.bool(forKey: key), !styleMask.contains(.fullScreen) {
+            toggleFullScreen(nil)
+        }
+        let keeper = FullscreenStateKeeper(key: key)
+        let nc = NotificationCenter.default
+        nc.addObserver(keeper, selector: #selector(FullscreenStateKeeper.didEnter),
+                       name: NSWindow.didEnterFullScreenNotification, object: self)
+        nc.addObserver(keeper, selector: #selector(FullscreenStateKeeper.didExit),
+                       name: NSWindow.didExitFullScreenNotification, object: self)
+        objc_setAssociatedObject(self, &fullscreenKeeperKey, keeper, .OBJC_ASSOCIATION_RETAIN_NONATOMIC)
+    }
+}
+
+private var fullscreenKeeperKey: UInt8 = 0
+
+/// Persists a window's native-fullscreen flag to UserDefaults on every
+/// enter/exit, so the next launch can restore it (see `persistFullscreen`).
+final class FullscreenStateKeeper: NSObject {
+    private let key: String
+    init(key: String) { self.key = key }
+    @objc func didEnter() { UserDefaults.standard.set(true, forKey: key) }
+    @objc func didExit()  { UserDefaults.standard.set(false, forKey: key) }
 }
 
 /// Manages the welcome window's lifecycle: close it when a document opens,

@@ -51,8 +51,8 @@ struct MDGEMCommands: Commands {
             Divider()
             Picker("Appearance", selection: $themeOverride) {
                 Text("Follow System").tag("system")
-                Text("Light").tag("light")
                 Text("Dark").tag("dark")
+                Text("Light").tag("light")
             }
             Divider()
             Button("Zoom In") { pageZoom = min(3.0, pageZoom + 0.1) }

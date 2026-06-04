@@ -364,7 +364,22 @@ struct MarkdownWebView: NSViewRepresentable {
                 guard let body = message.body as? [String: Any],
                       let path = body["path"] as? String else { return }
                 let url = URL(fileURLWithPath: path)
-                DispatchQueue.main.async { NSWorkspace.shared.open(url) }
+                let preferBrowser = (body["browser"] as? Bool) ?? false
+                DispatchQueue.main.async {
+                    // HTML prefers Google Chrome; fall back to the default app
+                    // (the system browser) when Chrome isn't installed.
+                    if preferBrowser,
+                       let chrome = NSWorkspace.shared.urlForApplication(
+                           withBundleIdentifier: "com.google.Chrome") {
+                        let cfg = NSWorkspace.OpenConfiguration()
+                        NSWorkspace.shared.open([url], withApplicationAt: chrome,
+                                                configuration: cfg) { _, err in
+                            if err != nil { NSWorkspace.shared.open(url) }
+                        }
+                    } else {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
             case "openFileDialog":
                 // Home-page "Open File" — a folder is also a valid target.
                 DispatchQueue.main.async { [weak self] in

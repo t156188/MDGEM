@@ -6,20 +6,17 @@
 // they update live.
 
 const THEMES = [
-  { id: 'light',          label: 'Light',           base: 'light', sw: ['#ffffff', '#0969da', '#1f2328'] },
-  { id: 'dark',           label: 'Dark',            base: 'dark',  sw: ['#0d1117', '#4493f8', '#e6edf3'] },
-  { id: 'github-dimmed',  label: 'GitHub Dimmed',   base: 'dark',  sw: ['#22272e', '#539bf5', '#adbac7'] },
-  { id: 'one-dark',       label: 'One Dark',        base: 'dark',  sw: ['#282c34', '#61afef', '#abb2bf'] },
-  { id: 'nord',           label: 'Nord',            base: 'dark',  sw: ['#2e3440', '#88c0d0', '#d8dee9'] },
-  { id: 'dracula',        label: 'Dracula',         base: 'dark',  sw: ['#282a36', '#bd93f9', '#f8f8f2'] },
-  { id: 'tokyo-night',    label: 'Tokyo Night',     base: 'dark',  sw: ['#1a1b26', '#7aa2f7', '#a9b1d6'] },
-  { id: 'monokai',        label: 'Monokai',         base: 'dark',  sw: ['#272822', '#a6e22e', '#f8f8f2'] },
-  { id: 'gruvbox-dark',   label: 'Gruvbox Dark',    base: 'dark',  sw: ['#282828', '#fabd2f', '#ebdbb2'] },
-  { id: 'solarized-dark', label: 'Solarized Dark',  base: 'dark',  sw: ['#002b36', '#268bd2', '#93a1a1'] },
-  { id: 'solarized-light',label: 'Solarized Light', base: 'light', sw: ['#fdf6e3', '#268bd2', '#586e75'] },
-  { id: 'rose-pine-dawn', label: 'Rosé Pine Dawn',  base: 'light', sw: ['#faf4ed', '#d7827e', '#575279'] },
+  { id: 'dark',           label: 'Dark（默认）', base: 'dark',  sw: ['#0d1117', '#4493f8', '#e6edf3'] },
+  { id: 'light',          label: 'Light',       base: 'light', sw: ['#ffffff', '#0969da', '#1f2328'] },
+  { id: 'cursor-dark',    label: 'Cursor Dark', base: 'dark',  sw: ['#111318', '#7c8cff', '#d7dde8'] },
+  { id: 'webstorm-dark',  label: 'WebStorm',    base: 'dark',  sw: ['#2b2d30', '#6c95eb', '#dfe1e5'] },
+  { id: 'claude-dark',    label: 'Claude',      base: 'dark',  sw: ['#171412', '#d97757', '#f0e7dc'] },
+  { id: 'cursor-light',   label: 'Cursor Light',base: 'light', sw: ['#f8fafc', '#315ee8', '#20242b'] },
+  { id: 'webstorm-light', label: 'WebStorm',    base: 'light', sw: ['#ffffff', '#0875e1', '#1f2328'] },
+  { id: 'codex-light',    label: 'GPT / Codex', base: 'light', sw: ['#fbfbf8', '#10a37f', '#202124'] },
 ];
 const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
+const VALID_THEME_IDS = new Set(['system', ...THEMES.map((t) => t.id)]);
 
 const AUTOSAVE = [
   { id: 'off',       label: '手动', hint: '仅 ⌘/Ctrl + S 保存' },
@@ -40,7 +37,7 @@ const SHORTCUTS = [
 ];
 
 const FONT_MIN = 10, FONT_MAX = 28;
-const DEFAULTS = { theme: 'system', fontUI: 13, fontEditor: 13, fontTerminal: 13, fontAI: 13, autoSave: 'off' };
+const DEFAULTS = { theme: 'dark', fontUI: 13, fontEditor: 13, fontTerminal: 13, fontAI: 13, autoSave: 'off' };
 const FONT_ROWS = [
   ['fontUI', '界面 / 文件树'],
   ['fontEditor', '编辑器'],
@@ -62,7 +59,7 @@ function clampFont(v, def) {
 function normalize(s) {
   const out = { ...DEFAULTS };
   if (s && typeof s === 'object') {
-    if (typeof s.theme === 'string') out.theme = s.theme;
+    if (typeof s.theme === 'string' && VALID_THEME_IDS.has(s.theme)) out.theme = s.theme;
     out.fontUI = clampFont(s.fontUI, DEFAULTS.fontUI);
     out.fontEditor = clampFont(s.fontEditor, DEFAULTS.fontEditor);
     out.fontTerminal = clampFont(s.fontTerminal, DEFAULTS.fontTerminal);
@@ -81,7 +78,7 @@ function escapeHtml(s) {
 function resolveBase(themeId) {
   if (themeId === 'system') return mqDark.matches ? 'dark' : 'light';
   const t = THEME_BY_ID[themeId];
-  return t ? t.base : (mqDark.matches ? 'dark' : 'light');
+  return t ? t.base : 'dark';
 }
 function applyTheme() {
   const base = resolveBase(S.theme);
@@ -285,6 +282,11 @@ function persist() {
 function render() {
   const root = document.getElementById('settings-root');
   if (!root) return;
+  const themeRows = [
+    [themeSystemCard(), themeCard(THEME_BY_ID.dark), themeCard(THEME_BY_ID.light)],
+    [themeCard(THEME_BY_ID['cursor-dark']), themeCard(THEME_BY_ID['webstorm-dark']), themeCard(THEME_BY_ID['claude-dark'])],
+    [themeCard(THEME_BY_ID['cursor-light']), themeCard(THEME_BY_ID['webstorm-light']), themeCard(THEME_BY_ID['codex-light'])],
+  ].map((row) => `<div class="set-theme-row">${row.join('')}</div>`).join('');
   root.innerHTML = `
     <nav class="settings-nav">
       <div class="settings-nav-title">设置</div>
@@ -297,11 +299,7 @@ function render() {
     <main class="settings-content">
       <section class="settings-sec" data-sec="appearance">
         <h2 class="settings-h2">主题</h2>
-        <button class="set-theme-card set-theme-system" data-theme-id="system" type="button">
-          <span class="set-theme-sw set-theme-sw-auto"><span class="set-theme-dot"></span></span>
-          <span class="set-theme-name">跟随系统</span>
-        </button>
-        <div class="set-theme-grid">${THEMES.map(themeCard).join('')}</div>
+        <div class="set-theme-rows">${themeRows}</div>
         <h2 class="settings-h2">字号</h2>
         ${FONT_ROWS.map(([k, label]) => fontRow(k, label)).join('')}
       </section>
@@ -393,6 +391,13 @@ function themeCard(t) {
         <span class="set-theme-bar" style="background:${t.sw[2]}"></span>
       </span>
       <span class="set-theme-name">${escapeHtml(t.label)}</span>
+    </button>`;
+}
+function themeSystemCard() {
+  return `
+    <button class="set-theme-card set-theme-system" data-theme-id="system" type="button" title="跟随系统">
+      <span class="set-theme-sw set-theme-sw-auto"><span class="set-theme-dot"></span></span>
+      <span class="set-theme-name">跟随系统</span>
     </button>`;
 }
 function fontRow(key, label) {
@@ -636,7 +641,7 @@ async function loadTermHistory() {
   for (const list of Object.values(termAll)) {
     if (!Array.isArray(list)) continue;
     for (const e of list) {
-      if (!e || !e.cmd) continue;
+      if (!e || !e.cmd || e.deleted) continue;
       const cur = stats.get(e.cmd);
       const count = (e.count || 0), lastUsed = (e.lastUsed || 0);
       if (cur) { cur.count += count; if (lastUsed > cur.lastUsed) cur.lastUsed = lastUsed; }
@@ -680,11 +685,14 @@ function renderTermSection() {
 
 async function deleteTermCommand(cmd) {
   if (!cmd) return;
+  // Soft delete: flag matching entries `deleted:true` instead of removing them,
+  // so the json data is kept (no recovery UI). The viewer filters them out.
   let changed = false;
   for (const k of Object.keys(termAll)) {
     if (!Array.isArray(termAll[k])) continue;
-    const kept = termAll[k].filter((e) => e && e.cmd !== cmd);
-    if (kept.length !== termAll[k].length) { termAll[k] = kept; changed = true; }
+    for (const e of termAll[k]) {
+      if (e && e.cmd === cmd && !e.deleted) { e.deleted = true; changed = true; }
+    }
   }
   if (changed) persistTermAll();
   await loadTermHistory();
@@ -692,8 +700,15 @@ async function deleteTermCommand(cmd) {
 }
 
 async function clearTermHistory() {
-  termAll = {};
-  try { await requestHistoryDelete('term', 'commands'); } catch {}
+  // Soft delete everything: flag every entry across all workspaces, keep the record.
+  let changed = false;
+  for (const k of Object.keys(termAll)) {
+    if (!Array.isArray(termAll[k])) continue;
+    for (const e of termAll[k]) {
+      if (e && !e.deleted) { e.deleted = true; changed = true; }
+    }
+  }
+  if (changed) persistTermAll();
   termCmds = [];
   renderTermSection();
 }

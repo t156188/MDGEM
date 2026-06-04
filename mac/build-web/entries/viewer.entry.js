@@ -256,7 +256,7 @@ function scrollToAnchor(id) {
 }
 
 // ===================================================================
-// Theme + global UI settings. Themes are named (8+); each has a light/dark
+// Theme + global UI settings. Themes are named; each has a light/dark
 // `base` that drives the highlight.js stylesheet, mermaid, terminal and editor
 // palettes. The native shell still resolves the OS appearance for the
 // `system` choice and pushes it via setTheme({name, pref}); a named theme is
@@ -268,23 +268,19 @@ function scrollToAnchor(id) {
 // `sw` = [background, accent, foreground] preview swatch colors (must mirror
 // the [data-theme='id'] CSS var sets in viewer.css).
 const THEMES = [
-  { id: 'light',          label: 'Light',           base: 'light', sw: ['#ffffff', '#0969da', '#1f2328'] },
-  { id: 'dark',           label: 'Dark',            base: 'dark',  sw: ['#0d1117', '#4493f8', '#e6edf3'] },
-  { id: 'github-dimmed',  label: 'GitHub Dimmed',   base: 'dark',  sw: ['#22272e', '#539bf5', '#adbac7'] },
-  { id: 'one-dark',       label: 'One Dark',        base: 'dark',  sw: ['#282c34', '#61afef', '#abb2bf'] },
-  { id: 'nord',           label: 'Nord',            base: 'dark',  sw: ['#2e3440', '#88c0d0', '#d8dee9'] },
-  { id: 'dracula',        label: 'Dracula',         base: 'dark',  sw: ['#282a36', '#bd93f9', '#f8f8f2'] },
-  { id: 'tokyo-night',    label: 'Tokyo Night',     base: 'dark',  sw: ['#1a1b26', '#7aa2f7', '#a9b1d6'] },
-  { id: 'monokai',        label: 'Monokai',         base: 'dark',  sw: ['#272822', '#a6e22e', '#f8f8f2'] },
-  { id: 'gruvbox-dark',   label: 'Gruvbox Dark',    base: 'dark',  sw: ['#282828', '#fabd2f', '#ebdbb2'] },
-  { id: 'solarized-dark', label: 'Solarized Dark',  base: 'dark',  sw: ['#002b36', '#268bd2', '#93a1a1'] },
-  { id: 'solarized-light',label: 'Solarized Light', base: 'light', sw: ['#fdf6e3', '#268bd2', '#586e75'] },
-  { id: 'rose-pine-dawn', label: 'Rosé Pine Dawn',  base: 'light', sw: ['#faf4ed', '#d7827e', '#575279'] },
+  { id: 'dark',           label: 'Dark（默认）', base: 'dark',  sw: ['#0d1117', '#4493f8', '#e6edf3'] },
+  { id: 'light',          label: 'Light',       base: 'light', sw: ['#ffffff', '#0969da', '#1f2328'] },
+  { id: 'cursor-dark',    label: 'Cursor Dark', base: 'dark',  sw: ['#111318', '#7c8cff', '#d7dde8'] },
+  { id: 'webstorm-dark',  label: 'WebStorm',    base: 'dark',  sw: ['#2b2d30', '#6c95eb', '#dfe1e5'] },
+  { id: 'claude-dark',    label: 'Claude',      base: 'dark',  sw: ['#171412', '#d97757', '#f0e7dc'] },
+  { id: 'cursor-light',   label: 'Cursor Light',base: 'light', sw: ['#f8fafc', '#315ee8', '#20242b'] },
+  { id: 'webstorm-light', label: 'WebStorm',    base: 'light', sw: ['#ffffff', '#0875e1', '#1f2328'] },
+  { id: 'codex-light',    label: 'GPT / Codex', base: 'light', sw: ['#fbfbf8', '#10a37f', '#202124'] },
 ];
 const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
 
 const SETTINGS_DEFAULTS = {
-  theme: 'system',     // 'system' | 'light' | 'dark' | <named theme id>
+  theme: 'dark',       // 'system' | 'light' | 'dark' | <named theme id>
   fontUI: 13,          // sidebar / tree / outline (px)
   fontEditor: 13,      // CodeMirror + code preview (px)
   fontTerminal: 13,    // xterm (px)
@@ -294,6 +290,7 @@ const SETTINGS_DEFAULTS = {
 const FONT_MIN = 10;
 const FONT_MAX = 28;
 const AUTOSAVE_MODES = ['off', 'afterEdit', 'onBlur', 'onLeave'];
+const VALID_THEME_IDS = new Set(['system', ...THEMES.map((t) => t.id)]);
 const SETTINGS_LS_KEY = 'mdgem.ui.settings';
 let uiSettings = { ...SETTINGS_DEFAULTS };
 // OS-resolved base ('light'|'dark') pushed by native — used only when the
@@ -309,7 +306,7 @@ function clampFont(v, def) {
 function normalizeSettings(s) {
   const out = { ...SETTINGS_DEFAULTS };
   if (s && typeof s === 'object') {
-    if (typeof s.theme === 'string') out.theme = s.theme;
+    if (typeof s.theme === 'string' && VALID_THEME_IDS.has(s.theme)) out.theme = s.theme;
     out.fontUI = clampFont(s.fontUI, SETTINGS_DEFAULTS.fontUI);
     out.fontEditor = clampFont(s.fontEditor, SETTINGS_DEFAULTS.fontEditor);
     out.fontTerminal = clampFont(s.fontTerminal, SETTINGS_DEFAULTS.fontTerminal);
@@ -329,9 +326,8 @@ function resolvedTheme() {
   }
   const t = THEME_BY_ID[pick];
   if (t) return { id: t.id, base: t.base };
-  // Unknown id — fall back to system.
-  const base = nativeBase === 'dark' ? 'dark' : 'light';
-  return { id: base, base };
+  // Unknown id — fall back to the app default.
+  return { id: 'dark', base: 'dark' };
 }
 
 function applyTheme() {
@@ -534,17 +530,33 @@ const Settings = (() => {
     });
   }
 
-  function build() {
-    const host = document.getElementById('settings-modal');
-    if (!host) return;
-    const themeCards = THEMES.map((t) => `
+  function themeCard(t) {
+    return `
       <button class="set-theme-card" data-theme-id="${t.id}" type="button" title="${escapeHtml(t.label)}">
         <span class="set-theme-sw" style="background:${t.sw[0]}">
           <span class="set-theme-dot" style="background:${t.sw[1]}"></span>
           <span class="set-theme-bar" style="background:${t.sw[2]}"></span>
         </span>
         <span class="set-theme-name">${escapeHtml(t.label)}</span>
-      </button>`).join('');
+      </button>`;
+  }
+
+  function themeSystemCard() {
+    return `
+      <button class="set-theme-card set-theme-system" data-theme-id="system" type="button" title="跟随系统">
+        <span class="set-theme-sw set-theme-sw-auto"><span class="set-theme-dot"></span></span>
+        <span class="set-theme-name">跟随系统</span>
+      </button>`;
+  }
+
+  function build() {
+    const host = document.getElementById('settings-modal');
+    if (!host) return;
+    const themeRows = [
+      [themeSystemCard(), themeCard(THEME_BY_ID.dark), themeCard(THEME_BY_ID.light)],
+      [themeCard(THEME_BY_ID['cursor-dark']), themeCard(THEME_BY_ID['webstorm-dark']), themeCard(THEME_BY_ID['claude-dark'])],
+      [themeCard(THEME_BY_ID['cursor-light']), themeCard(THEME_BY_ID['webstorm-light']), themeCard(THEME_BY_ID['codex-light'])],
+    ].map((row) => `<div class="set-theme-row">${row.join('')}</div>`).join('');
     const fontRow = (key, label) => `
       <div class="set-font-row" data-font="${key}">
         <span class="set-font-label">${escapeHtml(label)}</span>
@@ -563,11 +575,7 @@ const Settings = (() => {
         <div class="set-body">
           <section class="set-section">
             <h3 class="set-h">主题</h3>
-            <button class="set-theme-card set-theme-system" data-theme-id="system" type="button">
-              <span class="set-theme-sw set-theme-sw-auto"><span class="set-theme-dot"></span></span>
-              <span class="set-theme-name">跟随系统</span>
-            </button>
-            <div class="set-theme-grid">${themeCards}</div>
+            <div class="set-theme-rows">${themeRows}</div>
           </section>
           <section class="set-section">
             <h3 class="set-h">字号</h3>
@@ -805,16 +813,20 @@ function onReadFileResult(reqId, payload) {
   resolve(payload || { ok: false, error: 'Empty result' });
 }
 
+// Ask the host to hand the file to an external app. HTML opens in a browser
+// (host prefers Chrome, falls back to the default browser); everything else
+// goes to the OS default app for its type.
 function requestOpenExternal(path) {
+  const browser = previewKind(path) === 'html';
   try {
     if (window.webkit?.messageHandlers?.openExternal) {
-      window.webkit.messageHandlers.openExternal.postMessage({ path });
+      window.webkit.messageHandlers.openExternal.postMessage({ path, browser });
       return;
     }
   } catch {}
   try {
     const ev = window.__TAURI__?.event;
-    if (ev?.emit) ev.emit('mdreader:open-external', fileURLFor(path));
+    if (ev?.emit) ev.emit('mdreader:open-external', { url: fileURLFor(path), browser });
   } catch {}
 }
 
@@ -894,6 +906,15 @@ async function previewFile(node) {
     if (!ok) return;
   }
   if (kind === 'md') {
+    // This md file is already the loaded document, but a non-md preview is
+    // currently on screen. The mac host de-dupes the re-open (same fileURL +
+    // same text → no re-render fires), which would strand the preview. Restore
+    // the cached markdown locally instead of round-tripping to native.
+    if (node.path === Sidebar.currentFilePath() && Sidebar.activePreview()) {
+      Sidebar.setActivePreview(null);
+      render(lastRenderedText, lastBaseDir);
+      return;
+    }
     requestOpenFile(node.path);
     return;
   }
@@ -902,13 +923,11 @@ async function previewFile(node) {
 
   const name = node.name || node.path;
   if (kind === 'image') {
-    DocView.toReadonly();
-    showPreview(node, `<div class="preview-host"><img class="preview-media" alt="${escapeHtml(name)}" src="${escapeHtml(fileURLFor(node.path))}"></div>`);
+    DocView.openMedia(node, `<div class="preview-host"><img class="preview-media" alt="${escapeHtml(name)}" src="${escapeHtml(fileURLFor(node.path))}"></div>`);
     return;
   }
   if (kind === 'video') {
-    DocView.toReadonly();
-    showPreview(node, `<div class="preview-host"><video class="preview-media" controls src="${escapeHtml(fileURLFor(node.path))}"></video></div>`);
+    DocView.openMedia(node, `<div class="preview-host"><video class="preview-media" controls src="${escapeHtml(fileURLFor(node.path))}"></video></div>`);
     return;
   }
   if (kind === 'html') {
@@ -1119,9 +1138,16 @@ const Sidebar = (() => {
   }
 
   function setFileTree(payload) {
+    const prevCurrent = (currentTree && currentTree.current) || null;
     currentTree = payload && payload.root ? payload : null;
+    const newCurrent = (currentTree && currentTree.current) || null;
+    // Only treat this as a fresh markdown render when `current` actually
+    // changed. A tree-only re-push — e.g. the FS watcher firing `bumpTree()`
+    // after we saved an unrelated code/text file — carries the same stale
+    // `current` and must NOT tear down the active editor/preview.
+    const currentChanged = !!newCurrent && newCurrent !== prevCurrent;
     // A real markdown open (host sets `current`) supersedes any non-md preview.
-    if (currentTree && currentTree.current) previewPath = null;
+    if (currentChanged) previewPath = null;
     if (currentTree?.root) {
       // If the workspace root changed, the cached lazy-dir contents from the
       // previous workspace are stale.
@@ -1146,8 +1172,9 @@ const Sidebar = (() => {
     renderFiles();
     // The host pushes the tree right *after* rendering a markdown doc (render
     // runs before setFileTree), so `current` only becomes authoritative here.
-    // Re-sync the doc/tab state now that we know the real path.
-    if (currentTree && currentTree.current) {
+    // Re-sync the doc/tab state now that we know the real path — but only when
+    // `current` changed, so a bare tree refresh doesn't reset the active editor.
+    if (currentChanged) {
       try { DocView.onMarkdownRendered(); } catch {}
     }
   }
@@ -1339,6 +1366,7 @@ const Sidebar = (() => {
         { label: '添加到 AI', action: () => AIPanel.attachFile(node.path, false) },
         'separator',
         { label: '打开', action: () => previewFile(node) },
+        { label: '用系统打开', action: () => requestOpenExternal(node.path) },
         { label: revealLabel(), action: () => fsOp({ op: 'reveal', path: node.path }) },
         { label: '复制路径', action: () => copyPath(node.path) },
         'separator',
@@ -1799,6 +1827,18 @@ function aiAllModels(cfg) {
   return out;
 }
 
+// Ordered candidates for "Auto": the top (first-listed) model of every usable
+// key, in config order — each key's highest-tier model by convention. A key is
+// usable only if it has a base URL, an API key, and at least one model. The
+// agent probes this list in order and locks onto the first that connects; if
+// every key's first model fails it errors out (no lower-tier fallback).
+function aiAutoCandidates(cfg) {
+  const provs = (cfg && Array.isArray(cfg.providers) ? cfg.providers : [])
+    .filter((p) => p && p.baseURL && p.apiKey && Array.isArray(p.models) && p.models.length);
+  // Only each key's first model — no lower-tier fallback (user's choice).
+  return provs.map((p) => ({ providerId: p.id, model: p.models[0] }));
+}
+
 // Resolve a dropdown selection to the credentials a chat request needs.
 //   sel: { providerId, model } | { auto: true } | null
 function aiResolveCreds(cfg, sel) {
@@ -2025,8 +2065,18 @@ const AIPanel = (() => {
   let built = false;
   let config = normalizeAiConfig(null);   // new multi-provider shape
   let activeSel = { auto: true };          // dropdown selection for this session
+  let autoLocked = null;      // when Auto probes a working model, it's locked here {providerId,model} for the rest of the session
   let convo = [];             // full OpenAI message array (source of truth)
   let busy = false;
+  // Inline approval (instead of a blocking modal): a mutating tool that needs
+  // confirmation parks itself in the chat as a tool-step chip with the diff /
+  // command + 允许 / 拒绝 buttons. `approvalCtxId` is the tool-call id currently
+  // executing; `pendingApprovals` holds the unresolved confirm promises;
+  // `stepPreview` keeps each step's diff / command so the chip can show it as a
+  // preview both before and after writing.
+  let approvalCtxId = null;
+  const pendingApprovals = new Map();  // tcId -> resolve(boolean)
+  const stepPreview = new Map();       // tcId -> {kind:'diff',path,oldText,newText,verb} | {kind:'cmd',text}
   let approvalPolicy = 'ask'; // base policy from config (ask/allowEdits/allowAll)
   let autoApprove = false;    // per-session "全部自动执行" override (toolbar toggle)
   let streamText = '';        // live text of the turn currently streaming (or null)
@@ -2039,9 +2089,12 @@ const AIPanel = (() => {
   let currentTitle = null;    // AI-generated or user-set title for the current session (overrides deriveTitle)
   let titleBusy = false;      // a title-generation request is in flight
   let histOutsideHandler = null; // document listener that dismisses the history dropdown
+  let histQuery = '';         // live filter text for the history dropdown's search box
 
   // Unified line-style clock icon for the history button (replaces the 🕘 emoji).
   const HISTORY_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 3v5h5"/><path d="M3.05 13A9 9 0 1 0 6 5.3L3 8"/><path d="M12 7v5l2.5 2.5"/></svg>';
+  // Small chat-bubble glyph that leads each history row (Cursor-style).
+  const HIST_ROW_ICON = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>';
 
   function panelEl() { return document.getElementById('ai-panel'); }
 
@@ -2064,7 +2117,7 @@ const AIPanel = (() => {
     let idx = null;
     try { idx = await requestHistoryList('chat'); } catch {}
     if (k !== historyKey) return; // workspace switched mid-load
-    sessions = (Array.isArray(idx) ? idx : []).filter((s) => s && s.workspace === k);
+    sessions = (Array.isArray(idx) ? idx : []).filter((s) => s && s.workspace === k && !s.deleted);
   }
 
   function deriveTitle() {
@@ -2111,6 +2164,7 @@ const AIPanel = (() => {
     if (!busy) {
       approvalPolicy = config.prefs.approvalPolicy;
       autoApprove = approvalPolicy === 'allowAll';
+      autoLocked = null;          // providers/keys changed — re-probe Auto next send
       // Keep the current selection if its model still exists; else Auto.
       const all = aiAllModels(config);
       if (activeSel && !activeSel.auto &&
@@ -2158,9 +2212,6 @@ const AIPanel = (() => {
     if (!b) return;
     b.innerHTML = `
       <div class="ai-toolbar">
-        <label class="ai-auto" title="勾选后本次会话内的写入 / 命令全部不再确认（覆盖设置里的执行权限）">
-          <input type="checkbox" class="ai-auto-cb"${autoApprove ? ' checked' : ''}> 全部自动执行
-        </label>
         <span class="ai-head-actions">
           <button type="button" class="ai-icon-btn" data-act="history" title="历史对话" aria-label="历史对话">${HISTORY_ICON}</button>
           <button type="button" class="ai-icon-btn" data-act="undo" title="撤销上次写入"${undoStack.length ? '' : ' disabled'}>↩</button>
@@ -2174,6 +2225,9 @@ const AIPanel = (() => {
           <div class="ai-attach" hidden></div>
           <textarea class="ai-input" rows="3" placeholder="交给我做点什么…（回车发送，Shift+回车换行）"></textarea>
           <div class="ai-compose-bar">
+            <label class="ai-auto" title="勾选后本次会话内的写入 / 命令全部不再确认（覆盖设置里的执行权限）">
+              <input type="checkbox" class="ai-auto-cb"${autoApprove ? ' checked' : ''}> 自动执行
+            </label>
             <select class="ai-model-select" title="选择模型">${modelOptionsHTML()}</select>
             <button type="submit" class="ai-send-btn" title="发送（回车）" aria-label="发送">
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.4 20.4l17.45-7.48a1 1 0 000-1.84L3.4 3.6a.993.993 0 00-1.39.91L2 9.12c0 .5.37.93.87.99L17 12 2.87 13.88c-.5.07-.87.5-.87 1l.01 4.61c0 .65.65 1.1 1.39.91z"/></svg>
@@ -2194,6 +2248,8 @@ const AIPanel = (() => {
         const i = v.indexOf(':');
         return { providerId: v.slice(0, i), model: v.slice(i + 1) };
       })();
+      autoLocked = null;            // a manual change re-arms Auto's probe next time
+      refreshAutoLabel();
     });
     b.querySelector('.ai-auto-cb').addEventListener('change', (e) => { autoApprove = e.target.checked; });
     b.querySelector('[data-act=undo]').addEventListener('click', () => undoLast());
@@ -2201,6 +2257,8 @@ const AIPanel = (() => {
       if (busy) return;
       snapshotCurrent();                       // keep what's there before clearing
       convo = []; currentSessionId = null; currentTitle = null; undoStack = []; updateUndoBtn();
+      autoLocked = null;                       // fresh chat re-picks an Auto model
+      pendingApprovals.clear(); stepPreview.clear();
       closeHistory();
       renderMessages();
     });
@@ -2283,10 +2341,20 @@ const AIPanel = (() => {
 
   // <option>s for the chat model dropdown: Auto (= default model) + every
   // configured (provider · model), with the current session selection marked.
+  // Auto option's label: always just "Auto" — no "优先/已用 xxx" hint.
+  function autoOptionLabel() {
+    return 'Auto';
+  }
+
+  // Patch the live dropdown's Auto label without re-rendering (keeps streaming intact).
+  function refreshAutoLabel() {
+    const sel = body()?.querySelector('.ai-model-select');
+    if (sel && sel.options.length) sel.options[0].textContent = autoOptionLabel();
+  }
+
   function modelOptionsHTML() {
     const all = aiAllModels(config);
-    const def = config.defaultModel;
-    const autoLabel = def ? `Auto（${def.model}）` : 'Auto';
+    const autoLabel = autoOptionLabel();
     const isAuto = !activeSel || activeSel.auto;
     let html = `<option value="__auto__"${isAuto ? ' selected' : ''}>${escapeHtml(autoLabel)}</option>`;
     for (const m of all) {
@@ -2337,22 +2405,73 @@ const AIPanel = (() => {
     return row;
   }
 
-  // A collapsible tool-step chip; shows the args and (once it arrives) the result.
+  // Resolve a parked inline approval and re-render so the chip updates.
+  function resolveApproval(tcId, ok) {
+    const resolve = pendingApprovals.get(tcId);
+    if (!resolve) return;
+    pendingApprovals.delete(tcId);
+    resolve(ok);
+    renderMessages();
+  }
+
+  // A collapsible tool-step chip. Shows the diff / command as a preview (before
+  // and after writing); while a mutating step awaits confirmation it renders an
+  // inline 允许 / 拒绝 bar instead of a blocking modal.
   function stepRow(tc, result) {
+    const tcId = tc.id;
+    const pending = pendingApprovals.has(tcId);
+    const prev = stepPreview.get(tcId);
+    const done = result != null;
     const row = document.createElement('div');
     row.className = 'ai-msg ai-msg-tool';
     const det = document.createElement('details');
-    det.className = 'ai-step';
-    const done = result != null;
+    det.className = 'ai-step' + (pending ? ' pending' : '');
     const sum = document.createElement('summary');
     sum.className = 'ai-step-sum';
-    sum.textContent = `${done ? '✓' : '⋯'} ${toolStepLabel(tc.function?.name, tc.function?.arguments)}`;
+    const mark = pending ? '⚠︎ 待确认' : (done ? '✓' : '⋯');
+    sum.textContent = `${mark} ${toolStepLabel(tc.function?.name, tc.function?.arguments)}`;
     det.appendChild(sum);
-    const pre = document.createElement('pre');
-    pre.className = 'ai-step-body';
-    const argStr = tc.function?.arguments || '';
-    pre.textContent = (argStr ? `args: ${argStr}\n\n` : '') + (done ? String(result) : '运行中…');
-    det.appendChild(pre);
+
+    // Body — prefer the diff / command preview when we have one.
+    if (prev && prev.kind === 'diff') {
+      const wrap = document.createElement('div');
+      wrap.className = 'ai-step-diff';
+      wrap.appendChild(buildDiffNode(prev.oldText, prev.newText));
+      det.appendChild(wrap);
+    } else {
+      const pre = document.createElement('pre');
+      pre.className = 'ai-step-body';
+      const argStr = tc.function?.arguments || '';
+      pre.textContent = (prev && prev.kind === 'cmd')
+        ? prev.text
+        : (argStr ? `args: ${argStr}\n\n` : '') + (done ? String(result) : '运行中…');
+      det.appendChild(pre);
+    }
+
+    if (pending) {
+      det.open = true;
+      const isCmd = prev && prev.kind === 'cmd';
+      const bar = document.createElement('div');
+      bar.className = 'ai-approve-bar';
+      const tip = document.createElement('span');
+      tip.className = 'ai-approve-tip';
+      tip.textContent = isCmd ? '允许运行此命令？' : '允许写入此改动？';
+      const no = document.createElement('button');
+      no.type = 'button'; no.className = 'ai-btn ai-approve-no'; no.textContent = '拒绝';
+      const ok = document.createElement('button');
+      ok.type = 'button'; ok.className = 'ai-btn primary'; ok.textContent = isCmd ? '执行' : '允许写入';
+      no.addEventListener('click', (e) => { e.preventDefault(); resolveApproval(tcId, false); });
+      ok.addEventListener('click', (e) => { e.preventDefault(); resolveApproval(tcId, true); });
+      bar.appendChild(tip); bar.appendChild(no); bar.appendChild(ok);
+      det.appendChild(bar);
+    } else if (done && prev) {
+      // After applying / declining, keep the preview and add a one-line result.
+      const note = document.createElement('div');
+      note.className = 'ai-step-note';
+      note.textContent = String(result);
+      det.appendChild(note);
+    }
+
     row.appendChild(det);
     return row;
   }
@@ -2426,25 +2545,53 @@ const AIPanel = (() => {
 
   // The agent loop: stream a turn, append it, run any requested tools, repeat
   // until the model stops calling tools (or we hit the step cap).
+  // Whether the session is in Auto mode (no explicit model picked).
+  function isAutoMode() { return !activeSel || !!activeSel.auto; }
+
+  // One streamed chat turn. In Auto mode with nothing locked yet, probe the
+  // candidate models in order and lock onto the first that connects; afterwards
+  // (and for an explicit pick) just use the resolved creds. Returns the chat
+  // result, or {error} if nothing worked.
+  async function chatTurn(onDelta) {
+    if (!isAutoMode() || autoLocked) {
+      const creds = aiResolveCreds(config, autoLocked || activeSel);
+      if (!creds) return { error: '当前选择的模型缺少地址或密钥，请在 设置 → AI 检查。' };
+      return requestAiChat(buildApiMessages(), aiToolSpecs(), onDelta, creds);
+    }
+    const cands = aiAutoCandidates(config);
+    if (!cands.length) return { error: '未配置可用的模型（需要 地址 + 密钥 + 至少一个模型）。' };
+    let lastErr = '请求失败';
+    for (let i = 0; i < cands.length; i++) {
+      const creds = aiResolveCreds(config, cands[i]);
+      if (!creds) continue;
+      // Discard any partial text a previous failed attempt streamed.
+      streamText = '';
+      const live = document.getElementById('ai-live-bubble'); if (live) live.textContent = '';
+      const res = await requestAiChat(buildApiMessages(), aiToolSpecs(), onDelta, creds);
+      if (res && !res.error) {
+        autoLocked = { providerId: cands[i].providerId, model: cands[i].model };
+        try { refreshAutoLabel(); } catch {}
+        return res;
+      }
+      lastErr = (res && res.error) || lastErr;
+    }
+    return { error: `自动选择失败：配置的 ${cands.length} 个模型都没能调通（最后错误：${lastErr}）。` };
+  }
+
   async function runAgent() {
     busy = true;
     const maxSteps = (config.prefs && config.prefs.maxSteps) || 24;
-    const creds = aiResolveCreds(config, activeSel);
-    if (!creds) {
-      convo.push({ role: 'assistant', content: '⚠️ 当前选择的模型缺少地址或密钥，请在 设置 → AI 检查。' });
-      busy = false; renderMessages(); return;
-    }
     try {
       for (let step = 0; step < maxSteps; step++) {
         streaming = true; streamText = '';
         renderMessages();
-        const res = await requestAiChat(buildApiMessages(), aiToolSpecs(), (t) => {
+        const res = await chatTurn((t) => {
           streamText += t;
           const el = document.getElementById('ai-live-bubble');
           if (el) el.textContent = streamText;
           const list = body()?.querySelector('.ai-messages');
           if (list) list.scrollTop = list.scrollHeight;
-        }, creds);
+        });
         streaming = false;
         if (!res || res.error) {
           convo.push({ role: 'assistant', content: `⚠️ ${(res && res.error) || '请求失败'}` });
@@ -2464,7 +2611,9 @@ const AIPanel = (() => {
         for (const tc of tcs) {
           let args = {};
           try { args = JSON.parse(tc.arguments || '{}'); } catch {}
+          approvalCtxId = tc.id;                 // so a mutating tool parks its inline approval on this chip
           const result = await executeAiTool(tc.name, args);
+          approvalCtxId = null;
           convo.push({ role: 'tool', tool_call_id: tc.id, content: clip(result, 16000) });
           renderMessages();
         }
@@ -2496,17 +2645,32 @@ const AIPanel = (() => {
     return msgs;
   }
 
-  // run_command et al. — only auto-approved when "allow all" (config or session).
-  async function confirmMutation(title, message, danger) {
-    if (autoApprove || approvalPolicy === 'allowAll') return true;
-    return showModal({ title, message, confirmLabel: '执行', danger: !!danger });
+  // Park a confirmation request inline on the current tool-step chip and resolve
+  // when the user clicks 允许 / 拒绝 there. Falls back to a modal only if there's
+  // no chip context (shouldn't happen inside the agent loop).
+  function inlineConfirm(modalOpts) {
+    const tcId = approvalCtxId;
+    if (!tcId) return showModal(modalOpts);
+    return new Promise((resolve) => {
+      pendingApprovals.set(tcId, resolve);
+      renderMessages();
+    });
   }
 
-  // Confirm a file write by showing the actual diff. Auto-applied when the
-  // policy allows edits (or all), or the session "全部自动执行" toggle is on.
+  // run_command et al. — only auto-approved when "allow all" (config or session).
+  async function confirmMutation(title, message, danger) {
+    if (approvalCtxId) stepPreview.set(approvalCtxId, { kind: 'cmd', text: message });
+    if (autoApprove || approvalPolicy === 'allowAll') return true;
+    return inlineConfirm({ title, message, confirmLabel: '执行', danger: !!danger });
+  }
+
+  // Confirm a file write by showing the actual diff inline. Auto-applied when the
+  // policy allows edits (or all), or the session "全部自动执行" toggle is on. The
+  // diff is recorded either way so the chip can show it as a preview afterward.
   async function confirmWrite(path, oldText, newText, verb) {
+    if (approvalCtxId) stepPreview.set(approvalCtxId, { kind: 'diff', path, oldText, newText, verb });
     if (autoApprove || approvalPolicy === 'allowEdits' || approvalPolicy === 'allowAll') return true;
-    return showModal({
+    return inlineConfirm({
       title: `${verb} ${baseName(path)}`,
       message: path,
       bodyNode: buildDiffNode(oldText, newText),
@@ -2574,10 +2738,13 @@ const AIPanel = (() => {
     const p = panelEl();
     if (!p) return;
     closeHistory();
+    histQuery = '';
     const o = document.createElement('div');
     o.className = 'ai-history';
     p.appendChild(o);
     renderHistory();
+    const q = o.querySelector('.ai-history-q');
+    if (q) q.focus();
     // Dropdown behaviour: dismiss on any click outside the list (the history
     // button's own handler toggles it shut, so ignore clicks on it).
     histOutsideHandler = (e) => {
@@ -2589,19 +2756,38 @@ const AIPanel = (() => {
     document.addEventListener('mousedown', histOutsideHandler, true);
   }
 
+  // Coarse recency bucket for a timestamp — drives the dropdown's section labels.
+  function histBucket(ts) {
+    const days = Math.floor((Date.now() - (ts || 0)) / 86400000);
+    if (days < 1) return '今天';
+    if (days < 2) return '昨天';
+    if (days < 7) return '本周';
+    if (days < 30) return '本月';
+    return '更早';
+  }
+
   function renderHistory() {
     const o = historyEl();
     if (!o) return;
-    const list = sessions.slice().sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
-    let rows = '';
-    if (!list.length) {
-      rows = '<div class="ai-history-empty">还没有历史对话</div>';
+    const q = histQuery.trim().toLowerCase();
+    const list = sessions
+      .filter((s) => !q || (s.title || '新对话').toLowerCase().includes(q))
+      .sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+    let body = '';
+    if (!sessions.length) {
+      body = '<div class="ai-history-empty">还没有历史对话</div>';
+    } else if (!list.length) {
+      body = '<div class="ai-history-empty">没有匹配的对话</div>';
     } else {
+      let lastBucket = null;
       for (const s of list) {
+        const b = histBucket(s.updatedAt);
+        if (b !== lastBucket) { body += `<div class="ai-history-sec">${b}</div>`; lastBucket = b; }
         const cur = s.id === currentSessionId ? ' current' : '';
-        rows += `<div class="ai-history-row${cur}" data-id="${escapeHtml(s.id)}">`
-          + `<div class="ai-history-main"><div class="ai-history-title" title="双击重命名">${escapeHtml(s.title || '新对话')}</div>`
-          + `<div class="ai-history-meta">${escapeHtml(relTime(s.updatedAt))}</div></div>`
+        body += `<div class="ai-history-row${cur}" data-id="${escapeHtml(s.id)}">`
+          + `<span class="ai-history-ico">${HIST_ROW_ICON}</span>`
+          + `<div class="ai-history-title" title="双击重命名">${escapeHtml(s.title || '新对话')}</div>`
+          + `<span class="ai-history-time">${escapeHtml(relTime(s.updatedAt))}</span>`
           + `<span class="ai-history-actions">`
           + `<button type="button" class="ai-history-rename" title="重命名" data-id="${escapeHtml(s.id)}">✎</button>`
           + `<button type="button" class="ai-history-del" title="删除" data-id="${escapeHtml(s.id)}">🗑</button>`
@@ -2609,12 +2795,21 @@ const AIPanel = (() => {
       }
     }
     o.innerHTML = `
-      <div class="ai-history-head">
-        <span>历史对话</span>
-        <button type="button" class="ai-icon-btn" data-act="close-history" title="关闭">×</button>
+      <div class="ai-history-search">
+        <input type="text" class="ai-history-q" placeholder="搜索历史对话…" value="${escapeHtml(histQuery)}" />
       </div>
-      <div class="ai-history-list">${rows}</div>`;
-    o.querySelector('[data-act=close-history]').addEventListener('click', () => closeHistory());
+      <div class="ai-history-list">${body}</div>`;
+    const qInput = o.querySelector('.ai-history-q');
+    qInput.addEventListener('input', (e) => {
+      histQuery = e.target.value;
+      renderHistory();                       // cheap re-render; restore focus + caret
+      const ni = historyEl()?.querySelector('.ai-history-q');
+      if (ni) { ni.focus(); ni.setSelectionRange(ni.value.length, ni.value.length); }
+    });
+    qInput.addEventListener('keydown', (e) => {
+      e.stopPropagation();
+      if (e.key === 'Escape') { e.preventDefault(); closeHistory(); }
+    });
     o.querySelectorAll('.ai-history-del').forEach((btn) => {
       btn.addEventListener('click', (e) => { e.stopPropagation(); deleteSession(btn.dataset.id); });
     });
@@ -2687,7 +2882,7 @@ const AIPanel = (() => {
     const hasUser = convo.some((m) => m.role === 'user');
     const hasAsst = convo.some((m) => m.role === 'assistant' && m.content && !String(m.content).startsWith('⚠️'));
     if (!hasUser || !hasAsst) return;
-    const creds = aiResolveCreds(config, activeSel);
+    const creds = aiResolveCreds(config, autoLocked || activeSel);  // reuse the session's locked Auto model
     if (!creds) return;
     titleBusy = true;
     const parts = [];
@@ -2726,6 +2921,8 @@ const AIPanel = (() => {
     currentSessionId = id;
     currentTitle = (rec.title || (sessions.find((x) => x.id === id) || {}).title) || null;
     undoStack = []; updateUndoBtn();
+    autoLocked = null;                 // loaded conversation re-arms Auto's probe
+    pendingApprovals.clear(); stepPreview.clear();
     closeHistory();
     renderMessages();
   }
@@ -2734,13 +2931,20 @@ const AIPanel = (() => {
     const s = sessions.find((x) => x.id === id);
     const ok = await showModal({
       title: '删除历史对话',
-      message: `确定删除「${(s && s.title) || '新对话'}」？此操作不可撤销。`,
+      message: `确定删除「${(s && s.title) || '新对话'}」？删除后将从列表移除。`,
       confirmLabel: '删除', danger: true,
     });
     if (!ok) return;
     sessions = sessions.filter((x) => x.id !== id);
     if (id === currentSessionId) currentSessionId = null;
-    try { requestHistoryDelete('chat', id); } catch {}
+    // Soft delete: keep the conversation file, flag it `deleted:true` and let
+    // native lift that into index.json (META_KEYS) so loadHistory filters it out.
+    try {
+      let rec = null;
+      try { rec = await requestHistoryRead('chat', id); } catch {}
+      const base = rec || { id, workspace: (s && s.workspace) || wsKey(), title: (s && s.title) || '' };
+      requestHistoryWrite('chat', id, { ...base, id, deleted: true });
+    } catch {}
     renderHistory();
   }
 
@@ -2850,23 +3054,20 @@ function refreshAfterWrite(f, content) {
 PanelHooks.ai = () => AIPanel.ensure();
 
 // ===================================================================
-// Terminal — real interactive PTY (xterm.js front, native PTY back). The
-// xterm bundle is loaded on demand the first time the panel opens. Bytes flow
-// as utf8 strings over IPC; the native side spawns/owns the pty keyed by id.
+// Terminal — real interactive PTY (hterm front, native PTY back). The hterm
+// bundle (window.MDTerm = { lib, hterm }) is loaded on demand the first time the
+// panel opens. hterm replaced xterm.js because its in-webview IME/composition
+// handling is solid under WKWebView, where xterm's keydown path doubled chars /
+// dropped IME. Bytes flow as utf8 strings over IPC; the native side spawns/owns
+// the pty keyed by id, unchanged by this swap.
 // ===================================================================
 
 let termBundleLoaded = false;
 async function ensureTermBundle() {
   if (termBundleLoaded) return;
-  if (!document.getElementById('xterm-css')) {
-    const link = document.createElement('link');
-    link.id = 'xterm-css';
-    link.rel = 'stylesheet';
-    link.href = 'vendor/xterm.css';
-    document.head.appendChild(link);
-  }
+  // hterm bundles its own styles into its iframe — no external CSS needed.
   const script = document.createElement('script');
-  script.src = 'vendor/terminal.bundle.js';
+  script.src = 'vendor/hterm_all.js';
   await new Promise((res, rej) => {
     script.onload = res;
     script.onerror = rej;
@@ -2875,7 +3076,7 @@ async function ensureTermBundle() {
   termBundleLoaded = true;
 }
 
-// id → xterm Terminal, so native onTermData/onTermExit can find their target.
+// id → hterm Terminal, so native onTermData/onTermExit can find their target.
 const termSessions = new Map();
 
 function termEmit(handler, event, payload) {
@@ -2896,38 +3097,80 @@ const requestTermResize = (id, cols, rows)      => termEmit('termResize', 'mdrea
 const requestTermKill   = (id)                  => termEmit('termKill',   'mdreader:term-kill',   { id });
 
 function onTermData(id, data) {
-  const t = termSessions.get(id);
-  if (t) t.write(data);
+  // TerminalPanel owns the hterm io (and buffers output that arrives before the
+  // terminal is ready), then runs raw-capture + app-mode tracking in afterOutput.
+  try { TerminalPanel.write(id, data); } catch {}
   try { TerminalPanel.afterOutput(id, data); } catch {}
 }
 function onTermExit(id, code) {
-  const t = termSessions.get(id);
-  if (t) t.write(`\r\n\x1b[90m[process exited${code != null ? ` (${code})` : ''}]\x1b[0m\r\n`);
+  try { TerminalPanel.write(id, `\r\n\x1b[90m[process exited${code != null ? ` (${code})` : ''}]\x1b[0m\r\n`); } catch {}
   try { TerminalPanel.markExit(id); } catch {}
 }
 
-// Derive the xterm palette from the active theme's CSS variables so the
+// Derive the terminal palette from the active theme's CSS variables so the
 // terminal tracks any named theme, not just light/dark.
 function termTheme() {
   const cs = getComputedStyle(document.documentElement);
   const v = (name, fallback) => (cs.getPropertyValue(name).trim() || fallback);
-  const bg = v('--bg', '#0d1117');
+  const bg = v('--code-bg', '#161b22');
   const fg = v('--fg', '#e6edf3');
   const accent = v('--accent', fg);
   return {
     background: bg,
     foreground: fg,
     cursor: accent,
-    cursorAccent: bg,
-    selectionBackground: v('--sidebar-current', 'rgba(128,128,128,0.3)'),
+    selection: v('--sidebar-current', 'rgba(128,128,128,0.3)'),
   };
+}
+
+// Curated ANSI-16 palettes (GitHub's) so terminal colors stay readable and
+// consistent: a dark-bg set and a light-bg set, picked by the theme's bg
+// luminance. hterm's own defaults are tuned for dark backgrounds and wash out on
+// the light themes, so we always override.
+const ANSI_DARK = [
+  '#484f58', '#ff7b72', '#3fb950', '#d29922', '#58a6ff', '#bc8cff', '#39c5cf', '#b1bac4',
+  '#6e7681', '#ffa198', '#56d364', '#e3b341', '#79c0ff', '#d2a8ff', '#56d4dd', '#f0f6fc',
+];
+const ANSI_LIGHT = [
+  '#24292f', '#cf222e', '#116329', '#7d4e00', '#0969da', '#8250df', '#1b7c83', '#6e7781',
+  '#57606a', '#a40e26', '#1a7f37', '#633c01', '#218bff', '#a475f9', '#3192aa', '#8c959f',
+];
+
+// Rough perceived-luminance test on a #rgb / #rrggbb / rgb() color string.
+function isLightColor(c) {
+  let r = 0, g = 0, b = 0;
+  const m = String(c).trim();
+  let h = m.replace('#', '');
+  if (/^[0-9a-f]{3}$/i.test(h)) h = h.split('').map((x) => x + x).join('');
+  if (/^[0-9a-f]{6}$/i.test(h)) {
+    r = parseInt(h.slice(0, 2), 16); g = parseInt(h.slice(2, 4), 16); b = parseInt(h.slice(4, 6), 16);
+  } else {
+    const rm = m.match(/(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rm) { r = +rm[1]; g = +rm[2]; b = +rm[3]; } else return false;
+  }
+  return (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+}
+
+// Push the theme colors + ANSI palette into one hterm terminal's prefs (hterm's
+// equivalent of xterm's options.theme). Safe before or after the terminal is
+// ready. Called on create and on every theme switch (applyTheme).
+function applyHtermPrefs(term) {
+  if (!term || !term.getPrefs) return;
+  const t = termTheme();
+  try {
+    const p = term.getPrefs();
+    p.set('background-color', t.background);
+    p.set('foreground-color', t.foreground);
+    p.set('cursor-color', t.cursor);
+    p.set('color-palette-overrides', isLightColor(t.background) ? ANSI_LIGHT : ANSI_DARK);
+  } catch {}
 }
 
 // Multi-session terminal: a left rail lists sessions (new / rename / delete),
 // the right pane shows the active one. The native side already keys PTYs by id,
 // so each session is just another id; switching only toggles which host shows.
 const TerminalPanel = (() => {
-  // id -> { id, name, term, fit, host, ro, tab, exited }
+  // id -> { id, name, term (hterm.Terminal), io, host, tab, exited, raw, … }
   const sessions = new Map();
   let activeId = null;
   let seq = 0;
@@ -2937,6 +3180,15 @@ const TerminalPanel = (() => {
   let termCommands = [];      // [{cmd, count, lastUsed}] learned for this workspace
   let termHistoryKey = null;  // workspace key `termCommands` was loaded for
   let termAll = {};           // full { "<workspace>": commands[] } map (one native record)
+  // Per-project terminal-output persistence. The live shell can't survive a
+  // restart, so we snapshot each terminal's grid+scrollback as clean logical-line
+  // text (see serializeSession) and replay it dimmed on reopen, with a fresh shell
+  // underneath. One file per terminal: term/<pid>.json, mirroring chat's
+  // one-file-per-conversation.
+  let snapTimer = null;        // debounce handle for snapshotSessions()
+  let initializing = false;    // guards the first restore/create against concurrent ensure() calls
+  const DIVIDER_MARK = '上次会话结束';   // identifies a replay divider line in snapshots
+  const SESSION_DIVIDER = `\r\n\x1b[90m──────────── ${DIVIDER_MARK} · 新终端 ────────────\x1b[0m\r\n\r\n`;
 
   function build() {
     const panel = document.getElementById('terminal-panel');
@@ -2960,6 +3212,9 @@ const TerminalPanel = (() => {
     }
     panel.querySelector('.term-new').addEventListener('click', () => create());
     initSideResize(panel);
+    // Best-effort final save on page teardown (the throttled per-output save is
+    // the real safety net; this just captures the last ~second of output).
+    window.addEventListener('beforeunload', () => { try { snapshotSessions(); } catch {} });
     built = true;
     return true;
   }
@@ -2974,18 +3229,59 @@ const TerminalPanel = (() => {
     }
     if (!window.MDTerm) return;
     if (!built && !build()) return;
-    if (sessions.size === 0) create();
-    else fitAndResize();
+    if (sessions.size === 0) {
+      if (initializing) return;          // a restore/create is already in flight — don't double-create
+      initializing = true;
+      try { await restoreOrCreate(); } finally { initializing = false; }
+    } else fitAndResize();
   }
 
-  function create() {
+  // First open for this workspace: replay the project's saved terminals (output
+  // greyed in, fresh shell underneath) if any, else open one blank terminal.
+  async function restoreOrCreate() {
+    let saved = [];
+    try { saved = await loadSavedSessions(); } catch {}
+    if (sessions.size > 0) return;            // a manual create() raced us — leave it
+    if (Array.isArray(saved) && saved.length) {
+      for (const s of saved) create({ pid: s.pid, name: s.name, restore: s.data, createdAt: s.createdAt });
+    } else {
+      create();
+    }
+  }
+
+  // List this workspace's saved terminals from the term/ index (one file per
+  // terminal, like chat). Skips the fixed-id `commands` record, soft-deleted
+  // tombstones, and any stale single `sessions` record from the old layout.
+  async function loadSavedSessions() {
+    const k = wsKey();
+    let idx = [];
+    try { idx = await requestHistoryList('term'); } catch {}
+    const metas = (Array.isArray(idx) ? idx : [])
+      .filter((m) => m && m.workspace === k && !m.deleted && m.id !== 'commands' && m.id !== 'sessions')
+      .sort((a, b) => (a.createdAt || 0) - (b.createdAt || 0));
+    const out = [];
+    for (const m of metas) {
+      let rec = null;
+      try { rec = await requestHistoryRead('term', m.id); } catch {}
+      if (rec && !rec.deleted) {
+        out.push({ pid: m.id, name: rec.name || m.name || '终端', data: rec.data || '', createdAt: rec.createdAt || m.createdAt || 0 });
+      }
+    }
+    return out;
+  }
+
+  function create(opts = {}) {
     if (!built || !window.MDTerm) return;
-    const { Terminal, FitAddon, Unicode11Addon, WebglAddon } = window.MDTerm;
+    const { lib, hterm } = window.MDTerm;
     seq += 1;
     const id = `t-${Date.now().toString(36)}-${seq.toString(36)}-${Math.floor(performance.now()).toString(36)}`;
+    // Persistent, filename-safe id for this terminal's own history file
+    // (term/<pid>.json). Reused across reopens so snapshots overwrite in place.
+    const pid = (opts.pid || `t${Date.now().toString(36)}${seq.toString(36)}${Math.floor(performance.now()).toString(36)}`).replace(/[^A-Za-z0-9_]/g, '');
     // Name new terminals after the current workspace folder (IDE-style) rather
-    // than a bare counter; disambiguate duplicates with a numeric suffix.
-    const base = (Sidebar.workspaceRoot() || '').split(/[\\/]/).filter(Boolean).pop() || '终端';
+    // than a bare counter; disambiguate duplicates with a numeric suffix. A
+    // restored session keeps its saved name as the preferred base.
+    const base = opts.name || (Sidebar.workspaceRoot() || '').split(/[\\/]/).filter(Boolean).pop() || '终端';
     let name = base;
     const taken = new Set([...sessions.values()].map((s) => s.name));
     for (let n = 2; taken.has(name); n++) name = `${base} ${n}`;
@@ -2995,56 +3291,11 @@ const TerminalPanel = (() => {
     host.dataset.id = id;
     mainEl.appendChild(host);
 
-    const term = new Terminal({
-      fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace",
-      fontSize: uiSettings.fontTerminal || 13,
-      lineHeight: 1.0,
-      letterSpacing: 0,
-      cursorBlink: true,
-      allowProposedApi: true,   // required by the unicode addon below
-      theme: termTheme(),
-    });
-    // Unicode 11 width tables so emoji / box-drawing measure like a real
-    // terminal — without this Claude CLI's frames and glyphs shift out of line.
-    try {
-      if (Unicode11Addon) {
-        term.loadAddon(new Unicode11Addon());
-        term.unicode.activeVersion = '11';
-      }
-    } catch {}
-    const fit = new FitAddon();
-    term.loadAddon(fit);
-    term.open(host);
-    // GPU renderer: integer-aligned cells so box lines actually connect, and far
-    // cheaper redraws for busy TUIs. Fall back to the DOM renderer on failure.
-    try {
-      if (WebglAddon) {
-        const webgl = new WebglAddon();
-        webgl.onContextLoss(() => { try { webgl.dispose(); } catch {} });
-        term.loadAddon(webgl);
-      }
-    } catch {}
-    term.onData((d) => handleTermInput(id, d));
-    term.onRender(() => { try { refreshGhost(id); } catch {} });
-    // Shift+Enter → ESC+CR. xterm sends a plain \r for both Enter and
-    // Shift+Enter; this makes Shift+Enter insert a newline in Claude Code /
-    // Codex (they read ESC+Enter, i.e. Option+Enter, as "newline") instead of
-    // submitting. Returning false stops xterm from also sending the bare \r.
-    term.attachCustomKeyEventHandler((ev) => {
-      if (ev.type === 'keydown' && ev.key === 'Enter'
-          && ev.shiftKey && !ev.ctrlKey && !ev.metaKey && !ev.altKey) {
-        ev.preventDefault();
-        requestTermInput(id, '\x1b\r');
-        return false;
-      }
-      return true;
-    });
-
-    // Floating dim "ghost" suggestion drawn over the grid at the cursor.
-    const ghostEl = document.createElement('div');
-    ghostEl.className = 'term-ghost';
-    ghostEl.style.display = 'none';
-    host.appendChild(ghostEl);
+    // hterm renders into its own iframe inside `host`. Prefs live in an in-memory
+    // store (theme/font are pushed in from our CSS vars, never persisted). Input,
+    // IME and paste are all handled by hterm's own textarea path — the reason we
+    // moved off xterm.js, whose WKWebView input path doubled chars / dropped IME.
+    const term = new hterm.Terminal({ storage: new lib.Storage.Memory() });
 
     const tab = document.createElement('div');
     tab.className = 'term-tab';
@@ -3063,22 +3314,91 @@ const TerminalPanel = (() => {
     });
     listEl.appendChild(tab);
 
-    const ro = new ResizeObserver(() => { if (id === activeId) fitAndResize(); });
-    ro.observe(host);
-
-    termSessions.set(id, term);
-    sessions.set(id, {
-      id, name, term, fit, host, ro, tab, exited: false, ghostEl,
+    const sess = {
+      id, pid, name, term, host, tab, exited: false,
+      ghostEl: null,                       // created inside the hterm iframe once ready
+      createdAt: opts.createdAt || Date.now(), dirty: false,
+      ready: false, spawned: false, pendingOut: [],
       track: { line: '', alt: false, disabled: false, suggest: '', modes: new Set() },
-    });
-    ensureTermHistory();
+    };
+    termSessions.set(id, term);
+    sessions.set(id, sess);
 
+    // hterm is ready once its init promise resolves and the iframe is decorated.
+    // Everything that needs the live io / keyboard / grid size happens here.
+    // Prefs MUST be set after decorate — hterm's pref-change observers touch the
+    // scrollport DOM, so setting them on a not-yet-decorated terminal throws (and
+    // would silently fall back to hterm's default light theme / font).
+    term.onTerminalReady = function () {
+      try {
+        const p = term.getPrefs();
+        p.set('font-family', "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace");
+        p.set('font-size', Number(uiSettings.fontTerminal) || 13);
+        p.set('cursor-blink', true);
+        p.set('scrollbar-visible', false);
+        p.set('copy-on-select', false);
+        p.set('audible-bell-sound', '');     // no bell asset / no beep
+        p.set('enable-bold-as-bright', true);
+      } catch {}
+      applyHtermPrefs(term);                 // theme colors + ANSI palette
+      const io = term.io.push();
+      sess.io = io;
+      // hterm's keymap (control keys → byte sequences) and its textarea/IME path
+      // both surface here as the resolved string headed for the PTY — exactly what
+      // xterm's onData gave us, so handleTermInput is reused verbatim.
+      io.onVTKeystroke = (str) => handleTermInput(id, str);
+      io.sendString    = (str) => handleTermInput(id, str);
+      io.onTerminalResize = (cols, rows) => {
+        if (sess.spawned) requestTermResize(id, Math.max(2, cols || 2), Math.max(2, rows || 2));
+      };
+      // Shift+Enter → ESC+CR (newline in Claude Code / Codex instead of submit).
+      try {
+        term.keyboard.bindings.addBinding('Shift+ENTER', function () {
+          handleTermInput(id, '\x1b\r');
+          return hterm.Keyboard.KeyActions.CANCEL;
+        });
+      } catch {}
+      term.installKeyboard();
+      try { term.setCursorVisible(true); } catch {}
+      try { installGhost(sess); } catch {}
+
+      // Replay saved output (stored as colored logical-line ANSI — see
+      // serializeSession), then a divider, then the fresh shell prints below.
+      // Stored lines are joined by \n → convert to \r\n for the terminal.
+      // serializeSession drops everything up to the last divider on re-save, so
+      // reopening never compounds.
+      if (opts.restore) {
+        try { io.print(`${String(opts.restore).replace(/\n/g, '\r\n')}\r\n${SESSION_DIVIDER}`); } catch {}
+      }
+      sess.ready = true;
+      if (sess.pendingOut.length) {
+        const buf = sess.pendingOut; sess.pendingOut = [];
+        for (const d of buf) write(id, d);
+      }
+
+      // Spawn the pty now we have a real grid size (hterm auto-fit the iframe).
+      // resyncOnData re-reports the size once the pty's first output proves it
+      // exists, covering a hidden-at-create terminal whose size settles on show.
+      const sz = term.screenSize || {};
+      const cols = Math.max(2, sz.width || 80);
+      const rows = Math.max(2, sz.height || 24);
+      sess.resyncOnData = true;
+      sess.spawned = true;
+      requestTermCreate(id, cols, rows, Sidebar.workspaceRoot() || '');
+    };
+
+    try { term.decorate(host); } catch {}
+    ensureTermHistory();
     activate(id);
-    // Fit once the host has real dimensions, then spawn the pty at that size.
-    requestAnimationFrame(() => {
-      try { fit.fit(); } catch {}
-      requestTermCreate(id, term.cols || 80, term.rows || 24, Sidebar.workspaceRoot() || '');
-    });
+  }
+
+  // Print pty output into a terminal's hterm io, buffering anything that arrives
+  // before the terminal is ready (its io is set up in onTerminalReady).
+  function write(id, data) {
+    const s = sessions.get(id);
+    if (!s) return;
+    if (!s.ready || !s.io) { s.pendingOut.push(data); return; }
+    try { s.io.print(data); } catch {}
   }
 
   function activate(id) {
@@ -3097,10 +3417,18 @@ const TerminalPanel = (() => {
   function remove(id) {
     const s = sessions.get(id);
     if (!s) return;
+    // Soft delete: rewrite this terminal's own file flagged `deleted:true` (keep
+    // its last output, but restore filters it out so it won't replay on reopen).
+    try {
+      requestHistoryWrite('term', s.pid, {
+        id: s.pid, workspace: wsKey(), name: s.name,
+        createdAt: s.createdAt, updatedAt: Date.now(),
+        data: serializeSession(s), deleted: true,
+      });
+    } catch {}
     requestTermKill(id);
-    try { s.ro.disconnect(); } catch {}
-    try { s.term.dispose(); } catch {}
-    s.host.remove();
+    try { s.term.uninstallKeyboard(); } catch {}
+    s.host.remove();            // removes hterm's iframe with it
     s.tab.remove();
     sessions.delete(id);
     termSessions.delete(id);
@@ -3128,7 +3456,7 @@ const TerminalPanel = (() => {
       done = true;
       if (keep) {
         const v = input.value.trim();
-        if (v) s.name = v;
+        if (v && v !== s.name) { s.name = v; s.dirty = true; scheduleSnapshot(); }
       }
       const span = document.createElement('span');
       span.className = 'term-tab-name';
@@ -3153,21 +3481,27 @@ const TerminalPanel = (() => {
 
   function fitAndResize() {
     const s = activeId ? sessions.get(activeId) : null;
-    if (!s) return;
-    try { s.fit.fit(); } catch {}
-    requestTermResize(s.id, s.term.cols, s.term.rows);
+    if (!s || !s.term) return;
+    // hterm re-measures its own scrollport on size changes and fires
+    // io.onTerminalResize; here we just report the current grid size to the pty,
+    // covering the hidden→visible activate transition where no resize event fired.
+    try {
+      const sz = s.term.screenSize;
+      if (s.spawned && sz && sz.width >= 2 && sz.height >= 2) {
+        requestTermResize(s.id, sz.width, sz.height);
+      }
+    } catch {}
   }
 
   function applyTheme() {
-    const t = termTheme();
-    for (const s of sessions.values()) s.term.options.theme = t;
+    for (const s of sessions.values()) applyHtermPrefs(s.term);
   }
 
   function applyFontSize(px) {
     const n = Number(px);
     if (!Number.isFinite(n)) return;
     for (const s of sessions.values()) {
-      s.term.options.fontSize = n;
+      try { s.term.getPrefs().set('font-size', n); } catch {}
     }
     fitAndResize();
   }
@@ -3193,6 +3527,8 @@ const TerminalPanel = (() => {
     try { rec = await requestHistoryRead('term', 'commands'); } catch {}
     if (k !== termHistoryKey) return;          // workspace switched mid-load
     termAll = (rec && typeof rec.commands === 'object' && rec.commands) ? rec.commands : {};
+    // Keep soft-deleted entries in the array so they survive re-persist; they are
+    // filtered out at the suggestion point (bestSuggestion) instead.
     termCommands = Array.isArray(termAll[k]) ? termAll[k] : [];
     termAll[k] = termCommands;
   }
@@ -3203,6 +3539,111 @@ const TerminalPanel = (() => {
     try { requestHistoryWrite('term', 'commands', { id: 'commands', commands: termAll }); } catch {}
   }
 
+  // hterm has no SerializeAddon. We rebuild ANSI from the rendered row DOM so the
+  // replay keeps its COLORS: hterm styles each span inline (style.color /
+  // backgroundColor as rgb(), fontWeight bold, fontStyle italic, textDecoration
+  // underline, .faint), so rowToAnsi emits truecolor SGR per span. Rows are joined
+  // into LOGICAL lines (wrapped rows have a `line-overflow` attr → no newline), so
+  // the stored text re-wraps naturally at whatever width the terminal is on reopen
+  // instead of a raw byte stream re-wrapping wrong. Then (testing a SGR-stripped
+  // copy of each line):
+  //  - drop everything up to the LAST replay divider, so a prior reopen's history
+  //    + old dividers are never re-saved (no compounding);
+  //  - strip zsh's partial-line `%` (PROMPT_SP) marker lines and trailing blanks;
+  //  - cap to the last 600 logical lines.
+  const MAX_REPLAY_LINES = 600;
+  const SGR_RE = /\x1b\[[0-9;]*m/g;
+
+  // hterm colors its spans with CSS vars: `rgb(var(--hterm-color-N))` for the 16
+  // ANSI palette entries (and `--hterm-{foreground,background}-color` for the
+  // defaults), or a literal `rgb(r,g,b)` for 24-bit truecolor. Map palette entries
+  // to a 256-color SGR (the replay terminal has the same palette, so index N
+  // renders identically), truecolor to a 24-bit SGR, and defaults to nothing.
+  // `base` is 38 (foreground) or 48 (background).
+  function colorSgr(str, base) {
+    if (!str) return '';
+    let m = String(str).match(/--hterm-(?:color-(\d+)|(?:foreground|background)-color)/);
+    if (m) return m[1] != null ? `;${base};5;${m[1]}` : '';
+    m = String(str).match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (m) return `;${base};2;${m[1]};${m[2]};${m[3]}`;
+    return '';
+  }
+
+  function rowToAnsi(row) {
+    let out = '';
+    for (const ch of row.childNodes) {
+      if (ch.nodeType === 3) { out += `\x1b[0m${ch.textContent}`; continue; }  // plain text node
+      const st = ch.style || {};
+      let sgr = '0';
+      sgr += colorSgr(st.color, 38);
+      sgr += colorSgr(st.backgroundColor, 48);
+      if (st.fontWeight === 'bold' || parseInt(st.fontWeight, 10) >= 600) sgr += ';1';
+      if (ch.faint) sgr += ';2';
+      if (st.fontStyle === 'italic') sgr += ';3';
+      const td = st.textDecorationLine || st.textDecoration || '';
+      if (td.includes('underline')) sgr += ';4';
+      if (td.includes('line-through')) sgr += ';9';
+      out += `\x1b[${sgr}m${ch.textContent || ''}`;
+    }
+    return `${out}\x1b[0m`;
+  }
+
+  function serializeSession(s) {
+    if (!s || !s.term || !s.term.getRowCount) return '';
+    let lines = [];
+    try {
+      const n = s.term.getRowCount();
+      let cur = '';
+      for (let i = 0; i < n; i++) {
+        let node = null;
+        try { node = s.term.getRowNode(i); } catch {}
+        cur += node ? rowToAnsi(node) : '';
+        if (i < n - 1 && !(node && node.getAttribute && node.getAttribute('line-overflow'))) {
+          lines.push(cur); cur = '';
+        }
+      }
+      lines.push(cur);
+    } catch { return ''; }
+    const plain = lines.map((l) => l.replace(SGR_RE, ''));
+    let lastDiv = -1;
+    for (let i = 0; i < plain.length; i++) if (plain[i].includes(DIVIDER_MARK)) lastDiv = i;
+    if (lastDiv >= 0) { lines = lines.slice(lastDiv + 1); plain.splice(0, lastDiv + 1); }
+    let rows = lines.map((l, i) => ({ l, p: plain[i] })).filter((x) => !/^%\s*$/.test(x.p));
+    while (rows.length && !rows[rows.length - 1].p.trim()) rows.pop();
+    if (rows.length > MAX_REPLAY_LINES) rows = rows.slice(rows.length - MAX_REPLAY_LINES);
+    return rows.map((x) => x.l).join('\n');
+  }
+
+  // Persist each terminal that produced output since the last snapshot to its own
+  // file (term/<pid>.json), mirroring chat's one-file-per-conversation layout, so
+  // reopening the project replays them.
+  function snapshotSessions() {
+    const k = wsKey();
+    const now = Date.now();
+    for (const s of sessions.values()) {
+      if (!s.dirty) continue;
+      // While a full-screen app owns the screen (claude / vim / less — alt-buffer
+      // or mouse modes active), getRowsText would capture its TUI, not the shell
+      // scrollback — replaying that later looks garbled. Keep `dirty` and defer
+      // until the app exits and the normal screen is back.
+      if (s.track && s.track.modes && s.track.modes.size > 0) continue;
+      s.dirty = false;
+      try {
+        requestHistoryWrite('term', s.pid, {
+          id: s.pid, workspace: k, name: s.name,
+          createdAt: s.createdAt, updatedAt: now, data: serializeSession(s),
+        });
+      } catch {}
+    }
+  }
+
+  // Throttled snapshot: coalesces an output burst into one save ~every 1.5s
+  // (captured at fire time, so it reflects the latest screen).
+  function scheduleSnapshot() {
+    if (snapTimer) return;
+    snapTimer = setTimeout(() => { snapTimer = null; try { snapshotSessions(); } catch {} }, 1500);
+  }
+
   // Learn one completed command: bump its count + recency (smart learning — a
   // command typed repeatedly climbs the 常用 list), then persist.
   function recordCommand(cmd) {
@@ -3210,7 +3651,8 @@ const TerminalPanel = (() => {
     if (!c || c.length > 200) return;          // skip empty / pasted blobs
     const now = Date.now();
     const e = termCommands.find((x) => x.cmd === c);
-    if (e) { e.count = (e.count || 0) + 1; e.lastUsed = now; }
+    // Re-typing a soft-deleted command revives it (clears the deleted flag).
+    if (e) { e.count = (e.count || 0) + 1; e.lastUsed = now; if (e.deleted) delete e.deleted; }
     else termCommands.push({ cmd: c, count: 1, lastUsed: now });
     persistTermHistory();
   }
@@ -3221,7 +3663,7 @@ const TerminalPanel = (() => {
   function bestSuggestion(prefix) {
     let best = null;
     for (const e of termCommands) {
-      if (!e.cmd) continue;
+      if (!e.cmd || e.deleted) continue;
       if (prefix && (e.cmd.length <= prefix.length || !e.cmd.startsWith(prefix))) continue;
       if (!best
         || (e.count || 0) > (best.count || 0)
@@ -3271,6 +3713,7 @@ const TerminalPanel = (() => {
     }
     requestTermInput(id, d);
     trackInput(tr, d);
+    scheduleGhost(id);   // typed line changed — reposition/refresh the ghost
   }
 
   // DEC private modes that signal an interactive app has taken over the screen
@@ -3281,6 +3724,16 @@ const TerminalPanel = (() => {
     '1049', '47', '1047',                          // alt screen
     '1000', '1001', '1002', '1003', '1005', '1006', '1015', '1016', // mouse
   ]);
+  // Ghost refresh, coalesced to one per frame per terminal (replaces xterm's
+  // term.onRender hook, which hterm has no equivalent of).
+  const ghostRaf = new Map();
+  function scheduleGhost(id) {
+    if (ghostRaf.has(id)) return;
+    ghostRaf.set(id, requestAnimationFrame(() => {
+      ghostRaf.delete(id);
+      try { refreshGhost(id); } catch {}
+    }));
+  }
 
   // Scan PTY output for app enter/leave and toggle the suggestion suppression.
   // While any such mode (or the kitty keyboard protocol) is active we stop
@@ -3289,6 +3742,19 @@ const TerminalPanel = (() => {
   function afterOutput(id, data) {
     const s = sessions.get(id);
     if (!s) return;
+    // First output proves the pty exists. Re-fit + resize now so zsh's COLUMNS
+    // matches the rendered grid even if the size settled (or a resize raced the
+    // pty's creation and got dropped) since spawn — the fix for the wrapping /
+    // self-overwriting prompt after a restore.
+    // Only the active terminal has a real on-screen size to fit against; hidden
+    // ones are re-synced by activate() when shown, so just clear the flag there.
+    if (s.resyncOnData) {
+      s.resyncOnData = false;
+      if (s.id === activeId) fitAndResize();
+    }
+    // Mark dirty so the throttled snapshot re-serializes this terminal's grid.
+    s.dirty = true;
+    scheduleSnapshot();        // persist this workspace's terminal output (throttled)
     const tr = s.track;
     if (!tr.modes) tr.modes = new Set();
     let changed = false;
@@ -3306,10 +3772,28 @@ const TerminalPanel = (() => {
     // Claude Code and Codex use it to read modified keys like Shift+Enter.
     if (/\x1b\[>[0-9;]*u/.test(data)) { tr.modes.add('kitty'); changed = true; }
     if (/\x1b\[<[0-9;]*u/.test(data)) { tr.modes.delete('kitty'); changed = true; }
+    scheduleGhost(id);         // cursor likely moved — reposition the ghost
     if (!changed) return;
     const app = tr.modes.size > 0;
     if (app && !tr.alt) { tr.alt = true; tr.line = ''; hideGhost(s); }
     else if (!app && tr.alt) { tr.alt = false; tr.line = ''; tr.disabled = false; }
+  }
+
+  // The ghost overlay lives INSIDE hterm's iframe document (so it shares the
+  // grid's coordinate system and font), positioned at the cursor node. Purely
+  // additive — any failure just hides it; typing is never affected.
+  function installGhost(s) {
+    try {
+      const doc = s.term.getScrollPort().getDocument();
+      if (!doc || !doc.body) return;
+      const el = doc.createElement('div');
+      el.className = 'term-ghost';
+      el.style.cssText =
+        'position:absolute;pointer-events:none;white-space:pre;opacity:0.42;'
+        + 'z-index:5;font:inherit;display:none;';
+      doc.body.appendChild(el);
+      s.ghostEl = el;
+    } catch {}
   }
 
   function hideGhost(s) {
@@ -3317,43 +3801,27 @@ const TerminalPanel = (() => {
     if (s.ghostEl) s.ghostEl.style.display = 'none';
   }
 
-  function cellDims(s) {
-    try {
-      const c = s.term._core._renderService.dimensions.css.cell;
-      if (c && c.width && c.height) return { w: c.width, h: c.height };
-    } catch {}
-    return null;
-  }
-
-  // Position the dim suggestion span at the cursor cell. Purely additive — if
-  // anything is unavailable we just hide it; typing is unaffected.
+  // Position the dim suggestion suffix at the cursor. hterm's cursorNode_ is an
+  // absolutely-positioned element in the iframe doc, so its offsetLeft/Top give
+  // the exact cell — no manual cols×charsize math needed.
   function refreshGhost(id) {
     const s = sessions.get(id);
     if (!s || !s.ghostEl) return;
     const tr = s.track;
-    // Show even on an empty line (Warp-style: the top command appears at a
-    // fresh prompt). Only alt-screen / uncertain input suppresses it.
     if (tr.alt || tr.disabled) { hideGhost(s); return; }
     const sug = bestSuggestion(tr.line);
-    if (!sug) { hideGhost(s); return; }
-    const dims = cellDims(s);
-    const screen = s.host.querySelector('.xterm-screen');
-    if (!dims || !screen) { hideGhost(s); return; }
-    let col, row;
-    try {
-      const buf = s.term.buffer.active;
-      col = buf.cursorX; row = buf.cursorY;
-    } catch { hideGhost(s); return; }
-    const hostRect = s.host.getBoundingClientRect();
-    const scrRect = screen.getBoundingClientRect();
-    const left = (scrRect.left - hostRect.left) + col * dims.w;
-    const top = (scrRect.top - hostRect.top) + row * dims.h;
+    if (!sug || sug.length <= tr.line.length || !sug.startsWith(tr.line)) { hideGhost(s); return; }
+    let cn = null;
+    try { cn = s.term.cursorNode_; } catch {}
+    if (!cn) { hideGhost(s); return; }
     tr.suggest = sug;
     s.ghostEl.textContent = sug.slice(tr.line.length);
-    s.ghostEl.style.left = `${left}px`;
-    s.ghostEl.style.top = `${top}px`;
-    s.ghostEl.style.height = `${dims.h}px`;
-    s.ghostEl.style.fontSize = `${s.term.options.fontSize || 13}px`;
+    try {
+      s.ghostEl.style.left = `${cn.offsetLeft}px`;
+      s.ghostEl.style.top = `${cn.offsetTop}px`;
+      s.ghostEl.style.height = `${cn.offsetHeight}px`;
+      s.ghostEl.style.lineHeight = `${cn.offsetHeight}px`;
+    } catch { hideGhost(s); return; }
     s.ghostEl.style.display = '';
   }
 
@@ -3391,7 +3859,7 @@ const TerminalPanel = (() => {
   }
 
   return {
-    ensure, fitAndResize, applyTheme, applyFontSize, markExit, create, afterOutput,
+    ensure, write, fitAndResize, applyTheme, applyFontSize, markExit, create, afterOutput,
   };
 })();
 
@@ -3458,6 +3926,14 @@ const DocView = (() => {
         toggle.title = cur.mode === 'edit' ? '切换到预览' : '切换到编辑';
       }
     }
+    // "外部打开" is offered for media (image/video) and html previews; html
+    // opens in a browser (Chrome-preferred), media in its default app.
+    const openExt = el('doc-open-ext');
+    if (openExt) {
+      const show = (cur.kind === 'media' || cur.kind === 'html') && cur.mode === 'preview';
+      openExt.hidden = !show;
+      if (show) openExt.title = cur.kind === 'html' ? '用浏览器打开' : '用系统默认程序打开';
+    }
     markDirty(cur.dirty);
   }
 
@@ -3514,6 +3990,18 @@ const DocView = (() => {
     cur = { path: p, ext: fileExt(p), kind: 'md', editable: true, mode: 'preview', dirty: false };
     renderBar();
     try { Tabs.note(p, 'md'); } catch {}
+    try { Memory.scheduleSave(); } catch {}
+  }
+
+  // Open an image/video — a non-editable readonly preview. Keeps a minimal
+  // modebar so the "外部打开" button is available (toReadonly would hide it).
+  function openMedia(node, inner) {
+    const p = node.path;
+    destroyEditor();
+    showMain();
+    cur = { path: p, ext: fileExt(p), kind: 'media', editable: false, mode: 'preview', dirty: false };
+    showPreview(node, inner);
+    renderBar();
     try { Memory.scheduleSave(); } catch {}
   }
 
@@ -3641,13 +4129,17 @@ const DocView = (() => {
   }
 
   return {
-    onMarkdownRendered, openText, openHtml, toReadonly, toggle, save, applyTheme,
+    onMarkdownRendered, openText, openHtml, openMedia, toReadonly, toggle, save, applyTheme,
     isDirty, isEditing, path, markClean, prepareLeave,
   };
 })();
 
 document.getElementById('doc-mode-toggle')?.addEventListener('click', () => DocView.toggle());
 document.getElementById('doc-save-btn')?.addEventListener('click', () => DocView.save());
+document.getElementById('doc-open-ext')?.addEventListener('click', () => {
+  const p = DocView.path();
+  if (p) requestOpenExternal(p);
+});
 
 // ===================================================================
 // Editor tabs — IDE-style header strip. Every opened file becomes a tab;

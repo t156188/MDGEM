@@ -44,19 +44,6 @@ await build({
   legalComments: 'none',
 });
 
-// Terminal (xterm.js + fit addon), loaded on demand when the terminal panel
-// first opens. Exposes window.MDTerm = { Terminal, FitAddon }.
-await build({
-  entryPoints: [resolve(__dirname, 'entries/terminal.entry.js')],
-  bundle: true,
-  minify: true,
-  format: 'iife',
-  globalName: 'MDTerm',
-  outfile: resolve(outDir, 'terminal.bundle.js'),
-  target: ['safari16'],
-  legalComments: 'none',
-});
-
 // Code editor (CodeMirror 6), loaded on demand the first time an editable
 // file is opened in edit mode. Exposes window.MDEditor = { createEditor, … }.
 await build({
@@ -92,7 +79,11 @@ await cp(hlCssDarkSrc, resolve(outDir, 'hljs-dark.css'));
 await cp(katexCssSrc, resolve(outDir, 'katex.min.css'));
 await cp(katexFontsSrc, resolve(outDir, 'fonts'), { recursive: true });
 
-const xtermCssSrc = resolve(__dirname, 'node_modules/@xterm/xterm/css/xterm.css');
-await cp(xtermCssSrc, resolve(outDir, 'xterm.css'));
+// hterm terminal engine — a prebuilt IIFE bundle (window.MDTerm = { lib, hterm })
+// vendored under vendor-src/. It is NOT an esbuild-friendly npm module, so it is
+// generated out-of-band (see vendor-src/README.md) and copied verbatim; loaded on
+// demand the first time the terminal panel opens.
+const htermSrc = resolve(__dirname, 'vendor-src/hterm_all.js');
+await cp(htermSrc, resolve(outDir, 'hterm_all.js'));
 
 console.log('✅ Front-end assets built to', outDir);
