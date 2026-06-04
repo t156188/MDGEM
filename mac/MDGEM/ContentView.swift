@@ -54,6 +54,7 @@ struct ContentView: View {
             pageZoom: pageZoom,
             treeNonce: session.treeNonce,
             onRequestOpen: { url in session.load(url: url) },
+            onRequestOpenWorkspace: { url in session.openAsWorkspace(url: url) },
             onFsOp: handleFsOp,
             onSetThemePref: { themeOverride = $0 }
         )

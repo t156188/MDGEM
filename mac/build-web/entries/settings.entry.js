@@ -37,13 +37,24 @@ const SHORTCUTS = [
 ];
 
 const FONT_MIN = 10, FONT_MAX = 28;
-const DEFAULTS = { theme: 'dark', fontUI: 13, fontEditor: 13, fontTerminal: 13, fontAI: 13, autoSave: 'off' };
+const DEFAULTS = { theme: 'dark', fontUI: 13, fontEditor: 13, fontTerminal: 13, fontAI: 13, fontMonoFamily: 'jetbrains', autoSave: 'off' };
 const FONT_ROWS = [
   ['fontUI', '界面 / 文件树'],
   ['fontEditor', '编辑器'],
   ['fontTerminal', '终端'],
   ['fontAI', 'AI 面板'],
 ];
+// Monospace family choices for code blocks / editor / terminal. Keep in sync
+// with MONO_FONTS in viewer.entry.js (this list only needs id + label).
+const MONO_FONTS = [
+  { id: 'jetbrains', label: 'JetBrains Mono（内置）' },
+  { id: 'system', label: '系统等宽' },
+  { id: 'sfmono', label: 'SF Mono' },
+  { id: 'menlo', label: 'Menlo' },
+  { id: 'cascadia', label: 'Cascadia Code' },
+  { id: 'sarasa', label: '等距更纱黑体 Sarasa Mono' },
+];
+const MONO_IDS = new Set(MONO_FONTS.map((f) => f.id));
 
 let S = { ...DEFAULTS };
 let activeSection = 'appearance';
@@ -64,6 +75,7 @@ function normalize(s) {
     out.fontEditor = clampFont(s.fontEditor, DEFAULTS.fontEditor);
     out.fontTerminal = clampFont(s.fontTerminal, DEFAULTS.fontTerminal);
     out.fontAI = clampFont(s.fontAI, DEFAULTS.fontAI);
+    if (MONO_IDS.has(s.fontMonoFamily)) out.fontMonoFamily = s.fontMonoFamily;
     if (AUTOSAVE.some((m) => m.id === s.autoSave)) out.autoSave = s.autoSave;
   }
   return out;
@@ -302,6 +314,13 @@ function render() {
         <div class="set-theme-rows">${themeRows}</div>
         <h2 class="settings-h2">字号</h2>
         ${FONT_ROWS.map(([k, label]) => fontRow(k, label)).join('')}
+        <h2 class="settings-h2">字体</h2>
+        <div class="set-font-row">
+          <span class="set-font-label">等宽字体（终端 / 代码 / 编辑器）</span>
+          <select class="set-select" id="mono-font-select">
+            ${MONO_FONTS.map((f) => `<option value="${f.id}">${escapeHtml(f.label)}</option>`).join('')}
+          </select>
+        </div>
       </section>
       <section class="settings-sec" data-sec="ai" hidden>
         <h2 class="settings-h2">密钥与模型</h2>
@@ -375,6 +394,9 @@ function render() {
   });
   root.querySelectorAll('.set-radio').forEach((r) => {
     r.addEventListener('change', () => { if (r.checked) { S.autoSave = r.value; persist(); } });
+  });
+  root.querySelector('#mono-font-select')?.addEventListener('change', (e) => {
+    if (MONO_IDS.has(e.target.value)) { S.fontMonoFamily = e.target.value; persist(); syncControls(); }
   });
 
   wireAiStatic();
@@ -719,9 +741,13 @@ function syncControls() {
   });
   document.querySelectorAll('.set-font-row').forEach((row) => {
     const key = row.dataset.font;
-    row.querySelector('.set-range').value = String(S[key]);
+    const range = row.querySelector('.set-range');
+    if (!key || !range) return;   // skip non-size rows (e.g. the mono-font picker)
+    range.value = String(S[key]);
     row.querySelector('.set-font-val').textContent = `${S[key]}px`;
   });
+  const monoSel = document.getElementById('mono-font-select');
+  if (monoSel) monoSel.value = MONO_IDS.has(S.fontMonoFamily) ? S.fontMonoFamily : 'jetbrains';
   document.querySelectorAll('.set-radio').forEach((r) => { r.checked = r.value === S.autoSave; });
 }
 

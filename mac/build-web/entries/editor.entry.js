@@ -154,7 +154,7 @@ const chromeTheme = EditorView.theme({
     fontSize: 'var(--editor-font-size, 13px)',
   },
   '.cm-scroller': {
-    fontFamily: "ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, 'Liberation Mono', monospace",
+    fontFamily: 'var(--mono-font)',
     lineHeight: '1.6',
   },
   '.cm-content': { caretColor: 'var(--accent)' },

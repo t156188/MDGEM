@@ -71,6 +71,26 @@ final class DocumentSession: ObservableObject {
         RecentFiles.add(url.path)
     }
 
+    /// Open a document as a fresh workspace inside THIS window (recent click).
+    /// Unlike `load(url:)`, this re-roots `workspaceRoot` to the target's
+    /// parent directory (or the folder itself), so the sidebar/tree follow the
+    /// new document instead of staying pinned to the old workspace.
+    func openAsWorkspace(url: URL) {
+        guard let data = try? Data(contentsOf: url) else { return }
+        let s = String(data: data, encoding: .utf8)
+            ?? String(data: data, encoding: .utf16)
+            ?? String(decoding: data, as: UTF8.self)
+        let newRoot = url.deletingLastPathComponent()
+        self.fileURL = url
+        self.text = s
+        if workspaceRoot != newRoot {
+            self.workspaceRoot = newRoot
+            watcher.watch(newRoot)
+            bumpTree()
+        }
+        RecentFiles.add(url.path)
+    }
+
     /// Re-bind to a new URL after a rename of the currently-open file.
     func rebind(to url: URL) {
         self.fileURL = url

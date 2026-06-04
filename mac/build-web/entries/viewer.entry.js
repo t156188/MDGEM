@@ -242,7 +242,13 @@ async function render(text, baseDir) {
   Sidebar.setOutline(outline);
   setLoading(false);
   updateEmptyState();
-  try { DocView.onMarkdownRendered(); } catch {}
+  // NB: we deliberately do NOT call DocView.onMarkdownRendered() here. The host
+  // pushes render(text) *before* setFileTree(current), so at this point
+  // Sidebar.currentFilePath() still holds the PREVIOUS document — noting that
+  // stale path would re-add a tab the user just closed. The authoritative
+  // sync happens in setFileTree() once `current` is updated. The two JS-local
+  // render() callers (preview de-dupe restore, refreshAfterWrite) call
+  // onMarkdownRendered themselves, since no setFileTree follows them.
   try {
     window.webkit?.messageHandlers?.didRender?.postMessage({ length: text.length });
   } catch {}
@@ -279,12 +285,30 @@ const THEMES = [
 ];
 const THEME_BY_ID = Object.fromEntries(THEMES.map((t) => [t.id, t]));
 
+// Monospace family choices for code blocks / editor / terminal. `stack` is the
+// CSS font-family list; 'jetbrains' leads with the bundled webfont so it looks
+// the same everywhere, the rest are common system fonts with graceful fallback.
+// Keep this list in sync with MONO_FONTS in settings.entry.js.
+const MONO_FONTS = [
+  { id: 'jetbrains', label: 'JetBrains Mono（内置）', stack: "'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" },
+  { id: 'system', label: '系统等宽', stack: "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace" },
+  { id: 'sfmono', label: 'SF Mono', stack: "'SF Mono', ui-monospace, Menlo, Monaco, monospace" },
+  { id: 'menlo', label: 'Menlo', stack: "Menlo, ui-monospace, Monaco, Consolas, monospace" },
+  { id: 'cascadia', label: 'Cascadia Code', stack: "'Cascadia Code', 'Cascadia Mono', ui-monospace, Consolas, monospace" },
+  { id: 'sarasa', label: '等距更纱黑体 Sarasa Mono', stack: "'Sarasa Mono SC', 'Sarasa Fixed SC', ui-monospace, monospace" },
+];
+const MONO_BY_ID = Object.fromEntries(MONO_FONTS.map((f) => [f.id, f]));
+function monoStack(id) {
+  return (MONO_BY_ID[id] || MONO_BY_ID.jetbrains).stack;
+}
+
 const SETTINGS_DEFAULTS = {
   theme: 'dark',       // 'system' | 'light' | 'dark' | <named theme id>
   fontUI: 13,          // sidebar / tree / outline (px)
   fontEditor: 13,      // CodeMirror + code preview (px)
   fontTerminal: 13,    // xterm (px)
   fontAI: 13,          // AI panel (px)
+  fontMonoFamily: 'jetbrains',  // code/editor/terminal family — see MONO_FONTS
   autoSave: 'off',     // 'off' | 'afterEdit' | 'onBlur' | 'onLeave'
 };
 const FONT_MIN = 10;
@@ -311,6 +335,7 @@ function normalizeSettings(s) {
     out.fontEditor = clampFont(s.fontEditor, SETTINGS_DEFAULTS.fontEditor);
     out.fontTerminal = clampFont(s.fontTerminal, SETTINGS_DEFAULTS.fontTerminal);
     out.fontAI = clampFont(s.fontAI, SETTINGS_DEFAULTS.fontAI);
+    if (MONO_BY_ID[s.fontMonoFamily]) out.fontMonoFamily = s.fontMonoFamily;
     if (AUTOSAVE_MODES.includes(s.autoSave)) out.autoSave = s.autoSave;
   }
   return out;
@@ -354,8 +379,18 @@ function applyFontSizes() {
   try { TerminalPanel.applyFontSize(uiSettings.fontTerminal); } catch {}
 }
 
+// Push the chosen monospace family into the --mono-font CSS var (drives code
+// blocks / editor / preview via viewer.css) and into every live terminal (hterm
+// renders in its own iframe, so it can't see the page var — set its pref).
+function applyFontFamilies() {
+  const stack = monoStack(uiSettings.fontMonoFamily);
+  document.documentElement.style.setProperty('--mono-font', stack);
+  try { TerminalPanel.applyMonoFont(stack); } catch {}
+}
+
 function applyAllSettings() {
   applyFontSizes();
+  applyFontFamilies();
   applyTheme();
 }
 
@@ -655,12 +690,10 @@ const Settings = (() => {
 
 // Home page — the empty-state turned into a welcome screen (shown whenever no
 // document is on screen). Open-file / open-folder buttons ask the host for its
-// native dialog; the recents list reopens past workspaces. On Windows this is
-// the launch screen; on macOS the launch screen is a native welcome window and
-// this also covers empty document windows (e.g. a folder with no markdown).
+// native dialog. On Windows this is the launch screen; on macOS the launch
+// screen is a native welcome window and this also covers empty document windows
+// (e.g. a folder with no markdown).
 const Home = (() => {
-  let recents = [];
-
   function init() {
     const ver = document.getElementById('home-version');
     if (ver) {
@@ -669,39 +702,9 @@ const Home = (() => {
     }
     document.getElementById('home-open-folder')?.addEventListener('click', () => requestOpenFolderDialog());
     document.getElementById('home-open-file')?.addEventListener('click', () => requestOpenFileDialog());
-    renderRecents();
   }
 
-  function setRecents(list) {
-    recents = Array.isArray(list) ? list.filter((s) => typeof s === 'string') : [];
-    renderRecents();
-  }
-
-  function renderRecents() {
-    const wrap = document.getElementById('home-recents');
-    const title = document.getElementById('home-recents-title');
-    if (!wrap) return;
-    const items = recents.slice(0, 8);
-    if (title) title.hidden = items.length === 0;
-    wrap.innerHTML = '';
-    for (const p of items) {
-      const row = document.createElement('div');
-      row.className = 'home-recent';
-      row.title = p;
-      const name = document.createElement('span');
-      name.className = 'home-recent-name';
-      name.textContent = p.split(/[\\/]/).pop() || p;
-      const dir = document.createElement('span');
-      dir.className = 'home-recent-dir';
-      dir.textContent = p;
-      row.appendChild(name);
-      row.appendChild(dir);
-      row.addEventListener('click', () => requestOpenRecent(p));
-      wrap.appendChild(row);
-    }
-  }
-
-  return { init, setRecents };
+  return { init };
 })();
 
 // ===================================================================
@@ -913,6 +916,9 @@ async function previewFile(node) {
     if (node.path === Sidebar.currentFilePath() && Sidebar.activePreview()) {
       Sidebar.setActivePreview(null);
       render(lastRenderedText, lastBaseDir);
+      // No setFileTree follows a local restore, and `current` is already this
+      // path, so sync the doc/tab state ourselves (render() no longer does it).
+      try { DocView.onMarkdownRendered(); } catch {}
       return;
     }
     requestOpenFile(node.path);
@@ -3200,6 +3206,9 @@ function aiActiveFile() {
 function refreshAfterWrite(f, content) {
   if (f.kind === 'md') {
     render(content, lastBaseDir);
+    // Same-file re-render (no setFileTree follows); keep the doc/tab state in
+    // sync since render() no longer calls onMarkdownRendered itself.
+    try { DocView.onMarkdownRendered(); } catch {}
   } else if (f.kind === 'text') {
     renderTextPreview({ path: f.path, name: f.path.split(/[\\/]/).pop() }, content);
   } else if (f.kind === 'html') {
@@ -3306,6 +3315,22 @@ function isLightColor(c) {
     if (rm) { r = +rm[1]; g = +rm[2]; b = +rm[3]; } else return false;
   }
   return (0.299 * r + 0.587 * g + 0.114 * b) > 150;
+}
+
+// @font-face for the bundled JetBrains Mono, injected into each hterm iframe via
+// the user-css-text pref (the iframe can't see the page's @font-face). Absolute
+// file:// URLs resolved against the viewer page so the iframe base doesn't matter.
+function htermFontFaceCss() {
+  let reg = 'vendor/fonts-mono/JetBrainsMono-Regular.woff2';
+  let bold = 'vendor/fonts-mono/JetBrainsMono-Bold.woff2';
+  try {
+    reg = new URL(reg, location.href).href;
+    bold = new URL(bold, location.href).href;
+  } catch {}
+  return `@font-face{font-family:'JetBrains Mono';font-weight:400;font-style:normal;`
+    + `src:url('${reg}') format('woff2');}`
+    + `@font-face{font-family:'JetBrains Mono';font-weight:700;font-style:normal;`
+    + `src:url('${bold}') format('woff2');}`;
 }
 
 // Push the theme colors + ANSI palette into one hterm terminal's prefs (hterm's
@@ -3489,7 +3514,11 @@ const TerminalPanel = (() => {
     term.onTerminalReady = function () {
       try {
         const p = term.getPrefs();
-        p.set('font-family', "ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace");
+        // hterm renders in its own iframe, so the page's @font-face can't reach
+        // it — inject the bundled JetBrains Mono face via user-css-text (absolute
+        // URL since the iframe's base differs from the page).
+        p.set('user-css-text', htermFontFaceCss());
+        p.set('font-family', monoStack(uiSettings.fontMonoFamily));
         p.set('font-size', Number(uiSettings.fontTerminal) || 13);
         p.set('cursor-blink', true);
         p.set('scrollbar-visible', false);
@@ -3659,6 +3688,15 @@ const TerminalPanel = (() => {
     if (!Number.isFinite(n)) return;
     for (const s of sessions.values()) {
       try { s.term.getPrefs().set('font-size', n); } catch {}
+    }
+    fitAndResize();
+  }
+
+  // Live-update the monospace family on every open terminal (settings change).
+  function applyMonoFont(stack) {
+    if (!stack) return;
+    for (const s of sessions.values()) {
+      try { s.term.getPrefs().set('font-family', stack); } catch {}
     }
     fitAndResize();
   }
@@ -4016,7 +4054,7 @@ const TerminalPanel = (() => {
   }
 
   return {
-    ensure, write, fitAndResize, applyTheme, applyFontSize, markExit, create, afterOutput,
+    ensure, write, fitAndResize, applyTheme, applyFontSize, applyMonoFont, markExit, create, afterOutput,
   };
 })();
 
@@ -6109,5 +6147,5 @@ window.MDViewerAPI = {
   toggleAiPanel: () => Panels.toggleAi(),
   toggleTerminal: () => Panels.toggleTerminal(),
   setLoading,
-  setRecents: (list) => { Sidebar.setRecents(list); Home.setRecents(list); },
+  setRecents: (list) => { Sidebar.setRecents(list); },
 };

@@ -86,4 +86,12 @@ await cp(katexFontsSrc, resolve(outDir, 'fonts'), { recursive: true });
 const htermSrc = resolve(__dirname, 'vendor-src/hterm_all.js');
 await cp(htermSrc, resolve(outDir, 'hterm_all.js'));
 
+// Bundled monospace webfont (JetBrains Mono, OFL) — vendored woff2 under
+// vendor-src/fonts/. Shipped so the "等宽字体" setting has a guaranteed-good
+// option regardless of what's installed on the machine. Referenced by a
+// @font-face in viewer.css (code/editor) and injected into the hterm iframe
+// via user-css-text (terminal).
+const monoFontsSrc = resolve(__dirname, 'vendor-src/fonts');
+await cp(monoFontsSrc, resolve(outDir, 'fonts-mono'), { recursive: true });
+
 console.log('✅ Front-end assets built to', outDir);

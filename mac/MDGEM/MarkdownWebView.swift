@@ -11,12 +11,16 @@ struct MarkdownWebView: NSViewRepresentable {
     let pageZoom: Double
     let treeNonce: Int
     let onRequestOpen: (URL) -> Void
+    /// A recent-file click: open in THIS window, re-rooting the workspace to
+    /// the target's directory (unlike onRequestOpen, which keeps the root).
+    let onRequestOpenWorkspace: (URL) -> Void
     let onFsOp: (FsOpRequest, @escaping (String, String) -> Void) -> Void
     let onSetThemePref: (String) -> Void
 
     func makeCoordinator() -> Coordinator {
         Coordinator(
             onRequestOpen: onRequestOpen,
+            onRequestOpenWorkspace: onRequestOpenWorkspace,
             onFsOp: onFsOp,
             onSetThemePref: onSetThemePref
         )
@@ -77,6 +81,7 @@ struct MarkdownWebView: NSViewRepresentable {
     func updateNSView(_ webView: WKWebView, context: Context) {
         let coord = context.coordinator
         coord.onRequestOpen = onRequestOpen
+        coord.onRequestOpenWorkspace = onRequestOpenWorkspace
         coord.onFsOp = onFsOp
         coord.onSetThemePref = onSetThemePref
 
@@ -152,6 +157,7 @@ struct MarkdownWebView: NSViewRepresentable {
     final class Coordinator: NSObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
         weak var webView: WKWebView?
         var onRequestOpen: (URL) -> Void
+        var onRequestOpenWorkspace: (URL) -> Void
         var onFsOp: (FsOpRequest, @escaping (String, String) -> Void) -> Void
         var onSetThemePref: (String) -> Void
         var isReady = false
@@ -169,10 +175,12 @@ struct MarkdownWebView: NSViewRepresentable {
 
         init(
             onRequestOpen: @escaping (URL) -> Void,
+            onRequestOpenWorkspace: @escaping (URL) -> Void,
             onFsOp: @escaping (FsOpRequest, @escaping (String, String) -> Void) -> Void,
             onSetThemePref: @escaping (String) -> Void
         ) {
             self.onRequestOpen = onRequestOpen
+            self.onRequestOpenWorkspace = onRequestOpenWorkspace
             self.onFsOp = onFsOp
             self.onSetThemePref = onSetThemePref
             super.init()
@@ -303,20 +311,17 @@ struct MarkdownWebView: NSViewRepresentable {
                 guard let body = message.body as? [String: Any],
                       let path = body["path"] as? String else { return }
                 let url = URL(fileURLWithPath: path)
-                // Always treat a recent click as a brand-new document open
-                // (NSDocumentController will surface an existing window if
-                // the same file is already open). If the file is gone, prune
-                // and tell the user via a toast.
+                // Open the recent in THIS window, re-rooting the workspace to
+                // its directory (see onRequestOpenWorkspace) instead of spawning
+                // a new document window. If the file is gone, prune + toast.
+                let openWS = onRequestOpenWorkspace
                 DispatchQueue.main.async { [weak self] in
                     if !FileManager.default.fileExists(atPath: path) {
                         RecentFiles.prune()
                         self?.toast(message: "That file no longer exists", kind: "error")
                         return
                     }
-                    NSDocumentController.shared.openDocument(
-                        withContentsOf: url,
-                        display: true
-                    ) { _, _, _ in }
+                    openWS(url)
                 }
             case "fsOp":
                 guard let body = message.body as? [String: Any],
